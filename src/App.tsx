@@ -4,6 +4,10 @@
  */
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
+import * as pdfjs from 'pdfjs-dist';
+
+// Set up PDF.js worker
+pdfjs.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.js`;
 import { 
   LayoutDashboard, 
   Upload, 
@@ -133,6 +137,7 @@ export default function App() {
   const [notifications, setNotifications] = useState<any[]>([]);
   const [activeInvoice, setActiveInvoice] = useState<Invoice | null>(null);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [pdfPreviewUrl, setPdfPreviewUrl] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   
   // Filters
@@ -298,10 +303,39 @@ export default function App() {
     setActiveInvoice(updatedInvoice);
   };
 
+  const generatePdfPreview = async (file: File) => {
+    try {
+      const arrayBuffer = await file.arrayBuffer();
+      const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
+      const page = await pdf.getPage(1);
+      
+      const viewport = page.getViewport({ scale: 0.5 });
+      const canvas = document.createElement('canvas');
+      const context = canvas.getContext('2d');
+      
+      if (!context) return;
+      
+      canvas.height = viewport.height;
+      canvas.width = viewport.width;
+      
+      await page.render({
+        canvasContext: context,
+        viewport: viewport,
+        canvas: canvas
+      }).promise;
+      
+      setPdfPreviewUrl(canvas.toDataURL());
+    } catch (err) {
+      console.error('Error generating PDF preview:', err);
+      setPdfPreviewUrl(null);
+    }
+  };
+
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file && file.type === 'application/pdf') {
       setSelectedFile(file);
+      generatePdfPreview(file);
     } else if (file) {
       alert('Please select a PDF file');
     }
@@ -312,6 +346,7 @@ export default function App() {
     const file = e.dataTransfer.files?.[0];
     if (file && file.type === 'application/pdf') {
       setSelectedFile(file);
+      generatePdfPreview(file);
     } else if (file) {
       alert('Please drop a PDF file');
     }
@@ -370,6 +405,7 @@ export default function App() {
     setUploadInvNum('');
     setUploadPoNum('');
     setSelectedFile(null);
+    setPdfPreviewUrl(null);
   };
 
   const handleLogin = (e: React.FormEvent) => {
@@ -659,7 +695,7 @@ export default function App() {
                 initial={{ opacity: 0, x: 20 }}
                 animate={{ opacity: 1, x: 0 }}
                 exit={{ opacity: 0, x: -20 }}
-                className="max-w-3xl mx-auto"
+                className={`mx-auto transition-all duration-300 ${pdfPreviewUrl ? 'max-w-6xl' : 'max-w-3xl'}`}
               >
                 <div className="flex items-center gap-4 mb-6">
                   <button onClick={() => setPage('dashboard')} className="p-2 hover:bg-black/5 rounded-lg transition-colors">
@@ -668,48 +704,88 @@ export default function App() {
                   <h1 className="text-xl font-semibold tracking-tight">Upload Invoice</h1>
                 </div>
 
-                <div className="bg-white border border-[#e0dbd3] rounded-xl p-8 shadow-sm">
-                  <div className="mb-8">
-                    <label className="block text-xs font-medium text-[#4a4e57] mb-2 uppercase tracking-wider">PDF Document *</label>
-                    <input 
-                      type="file" 
-                      ref={fileInputRef}
-                      onChange={handleFileChange}
-                      accept="application/pdf"
-                      className="hidden"
-                    />
-                    <div 
-                      onClick={() => fileInputRef.current?.click()}
-                      onDragOver={(e) => e.preventDefault()}
-                      onDrop={handleDrop}
-                      className={`border-2 border-dashed rounded-xl p-10 text-center cursor-pointer transition-all group ${
-                        selectedFile ? 'border-[#059669] bg-[#ecfdf5]' : 'border-[#e0dbd3] hover:border-[#2a5f9e] hover:bg-[#eaf1fb]'
-                      }`}
-                    >
-                      <div className="text-4xl mb-3 group-hover:scale-110 transition-transform">
-                        {selectedFile ? '✅' : '📄'}
-                      </div>
-                      <p className="text-sm font-medium">
-                        {selectedFile ? selectedFile.name : 'Click to upload or drag & drop'}
-                      </p>
-                      <p className="text-[11px] text-[#8c909a] mt-1">
-                        {selectedFile ? `${(selectedFile.size / 1024 / 1024).toFixed(2)} MB` : 'PDF only · max 25 MB'}
-                      </p>
-                      {selectedFile && (
+                <div className={`grid gap-8 ${pdfPreviewUrl ? 'grid-cols-1 lg:grid-cols-2' : 'grid-cols-1'}`}>
+                  {/* Left Side: PDF Preview (if available) */}
+                  {pdfPreviewUrl && (
+                    <div className="bg-white border border-[#e0dbd3] rounded-xl p-4 shadow-sm h-fit sticky top-6">
+                      <div className="flex items-center justify-between mb-4">
+                        <h2 className="text-xs font-medium text-[#4a4e57] uppercase tracking-wider">Invoice Preview</h2>
                         <button 
-                          onClick={(e) => {
-                            e.stopPropagation();
+                          onClick={() => {
                             setSelectedFile(null);
+                            setPdfPreviewUrl(null);
                           }}
-                          className="mt-3 text-[10px] text-[#dc2626] hover:underline"
+                          className="text-[10px] text-[#dc2626] hover:underline"
                         >
                           Remove file
                         </button>
+                      </div>
+                      <div className="border border-[#e0dbd3] rounded-lg overflow-hidden bg-[#faf9f7] flex items-center justify-center min-h-[400px]">
+                        <img src={pdfPreviewUrl} alt="PDF Preview" className="w-full h-auto shadow-lg" />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Right Side: Form */}
+                  <div className="bg-white border border-[#e0dbd3] rounded-xl p-8 shadow-sm h-fit">
+                    <div className="mb-8">
+                      <label className="block text-xs font-medium text-[#4a4e57] mb-2 uppercase tracking-wider">PDF Document *</label>
+                      <input 
+                        type="file" 
+                        ref={fileInputRef}
+                        onChange={handleFileChange}
+                        accept="application/pdf"
+                        className="hidden"
+                      />
+                      {!pdfPreviewUrl ? (
+                        <div 
+                          onClick={() => fileInputRef.current?.click()}
+                          onDragOver={(e) => e.preventDefault()}
+                          onDrop={handleDrop}
+                          className={`border-2 border-dashed rounded-xl p-10 text-center cursor-pointer transition-all group ${
+                            selectedFile ? 'border-[#059669] bg-[#ecfdf5]' : 'border-[#e0dbd3] hover:border-[#2a5f9e] hover:bg-[#eaf1fb]'
+                          }`}
+                        >
+                          <div className="text-4xl mb-3 group-hover:scale-110 transition-transform">
+                            {selectedFile ? '✅' : '📄'}
+                          </div>
+                          <p className="text-sm font-medium">
+                            {selectedFile ? selectedFile.name : 'Click to upload or drag & drop'}
+                          </p>
+                          <p className="text-[11px] text-[#8c909a] mt-1">
+                            {selectedFile ? `${(selectedFile.size / 1024 / 1024).toFixed(2)} MB` : 'PDF only · max 25 MB'}
+                          </p>
+                          {selectedFile && (
+                            <button 
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setSelectedFile(null);
+                                setPdfPreviewUrl(null);
+                              }}
+                              className="mt-3 text-[10px] text-[#dc2626] hover:underline"
+                            >
+                              Remove file
+                            </button>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-3 p-3 bg-[#ecfdf5] border border-[#059669] rounded-lg">
+                          <div className="text-xl">✅</div>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-xs font-medium truncate">{selectedFile?.name}</p>
+                            <p className="text-[10px] text-[#059669]">File ready for upload</p>
+                          </div>
+                          <button 
+                            onClick={() => fileInputRef.current?.click()}
+                            className="text-[10px] text-[#2a5f9e] hover:underline font-medium"
+                          >
+                            Change
+                          </button>
+                        </div>
                       )}
                     </div>
-                  </div>
 
-                  <div className="grid grid-cols-2 gap-5">
+                    <div className="grid grid-cols-2 gap-5">
                     <div className="space-y-1.5">
                       <label className="text-xs font-medium text-[#4a4e57]">Store *</label>
                       <select 
@@ -762,8 +838,9 @@ export default function App() {
                     </button>
                   </div>
                 </div>
-              </motion.div>
-            )}
+              </div>
+            </motion.div>
+          )}
           </AnimatePresence>
         </div>
       </main>
