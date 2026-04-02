@@ -139,6 +139,8 @@ export default function App() {
   const [activeInvoice, setActiveInvoice] = useState<Invoice | null>(null);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [pdfPreviewUrl, setPdfPreviewUrl] = useState<string | null>(null);
+  const [newComment, setNewComment] = useState('');
+  const [isAddingComment, setIsAddingComment] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   
   // Filters
@@ -148,6 +150,10 @@ export default function App() {
   const [storeFilter, setStoreFilter] = useState<string>('');
   const [searchFilter, setSearchFilter] = useState<string>('');
   const [amountFilter, setAmountFilter] = useState<string>('');
+  const [selectedAction, setSelectedAction] = useState<'APPROVED' | 'DENIED' | 'HOLD' | null>(null);
+  const [isReminderModalOpen, setIsReminderModalOpen] = useState(false);
+  const [isChangePasswordModalOpen, setIsChangePasswordModalOpen] = useState(false);
+  const [newPassword, setNewPassword] = useState('');
   const [isSupabaseConfigured, setIsSupabaseConfigured] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
 
@@ -167,9 +173,7 @@ export default function App() {
       setCurrentUserId(savedUser);
     }
 
-    const url = 'https://ouwoicujgqxpnzjspwcz.supabase.co';
-    const key = import.meta.env.VITE_SUPABASE_ANON_KEY;
-    const configured = !!(url && key);
+    const configured = !!supabase;
     setIsSupabaseConfigured(configured);
     
     if (configured) {
@@ -259,17 +263,26 @@ export default function App() {
   }, [uploadStoreId, uploadAmount]);
 
   const stats = useMemo(() => {
+    // Use base invoices (after user-level filtering) for stats, not filteredInvoices
+    const baseInvoices = invoices.filter(inv => {
+      if (!currentUser) return false;
+      if (currentUser.id === 'it' || currentUser.role === 'AP_SUPERVISOR' || currentUser.role === 'AP_COORDINATOR' || currentUser.role === 'ACCOUNTING' || currentUser.role === 'FINANCE_MANAGER' || currentUser.role === 'COO' || currentUser.role === 'VP') return true;
+      if (currentUser.role === 'AREA_COACH') return inv.acId === currentUser.id;
+      if (currentUser.role === 'DIRECTOR') return inv.division === currentUser.division;
+      return false;
+    });
+
     const counts = { PENDING: 0, APPROVED: 0, HOLD: 0, DENIED: 0, PAID: 0 };
     let paidTotal = 0;
-    filteredInvoices.forEach(i => {
+    baseInvoices.forEach(i => {
       counts[i.status]++;
       if (i.status === 'PAID') paidTotal += i.amount;
     });
-    return { counts, paidTotal, total: filteredInvoices.length };
-  }, [filteredInvoices]);
+    return { counts, paidTotal, total: baseInvoices.length };
+  }, [invoices, currentUser]);
 
   const handleAction = async (type: 'APPROVED' | 'DENIED' | 'HOLD' | 'PUSH_BACK' | 'PAID', comment: string) => {
-    if (!activeInvoice) return;
+    if (!activeInvoice || !currentUser) return;
     
     const now = Date.now();
     const updatedInvoice = { ...activeInvoice };
@@ -282,7 +295,7 @@ export default function App() {
       const currentCycle = updatedInvoice.approvalCycles[updatedInvoice.approvalCycles.length - 1];
       currentCycle.steps.push({
         stage: updatedInvoice.currentStage as Role,
-        userId: currentUserId,
+        userId: currentUser.id,
         action: type,
         ts: now,
         comment
@@ -317,6 +330,76 @@ export default function App() {
     }
     
     setActiveInvoice(updatedInvoice);
+    setSelectedAction(null);
+    setNewComment('');
+  };
+
+  const handleRevoke = async () => {
+    if (!activeInvoice || !currentUser) return;
+    
+    const updatedInvoice = { ...activeInvoice };
+    const currentCycle = updatedInvoice.approvalCycles[updatedInvoice.approvalCycles.length - 1];
+    
+    const lastStepIdx = [...currentCycle.steps].reverse().findIndex(s => s.userId === currentUser.id && s.action === 'APPROVED');
+    
+    if (lastStepIdx === -1) return;
+    
+    const actualIdx = currentCycle.steps.length - 1 - lastStepIdx;
+    const revokedStep = currentCycle.steps[actualIdx];
+    
+    currentCycle.steps.splice(actualIdx, 1);
+    
+    updatedInvoice.status = 'PENDING';
+    updatedInvoice.currentStage = revokedStep.stage;
+    updatedInvoice.updatedAt = Date.now();
+
+    if (isSupabaseConfigured) {
+      try {
+        await invoiceService.updateInvoice(updatedInvoice.id, updatedInvoice);
+      } catch (err) {
+        console.error('Failed to update invoice in Supabase:', err);
+      }
+    } else {
+      setInvoices(prev => prev.map(i => i.id === updatedInvoice.id ? updatedInvoice : i));
+    }
+    
+    setActiveInvoice(updatedInvoice);
+  };
+
+  const handleAddComment = async () => {
+    if (!activeInvoice || !currentUser || !newComment.trim() || isAddingComment) return;
+
+    setIsAddingComment(true);
+    const now = Date.now();
+    const commentObj: Comment = {
+      id: `CMT-${now}`,
+      userId: currentUser.id,
+      text: newComment.trim(),
+      mentions: [],
+      ts: now
+    };
+
+    const updatedInvoice = {
+      ...activeInvoice,
+      comments: [...(activeInvoice.comments || []), commentObj],
+      updatedAt: now
+    };
+
+    if (isSupabaseConfigured) {
+      try {
+        await invoiceService.updateInvoice(updatedInvoice.id, updatedInvoice);
+        setNewComment('');
+      } catch (err) {
+        console.error('Failed to add comment in Supabase:', err);
+        alert('Failed to save comment.');
+      }
+    } else {
+      setInvoices(prev => prev.map(i => i.id === updatedInvoice.id ? updatedInvoice : i));
+      setNewComment('');
+    }
+    
+    setActiveInvoice(updatedInvoice);
+    setIsAddingComment(false);
   };
 
   const generatePdfPreview = async (file: File) => {
@@ -408,9 +491,19 @@ export default function App() {
 
     if (isSupabaseConfigured) {
       try {
-        await invoiceService.createInvoice(newInvoice as any);
+        const createdInvoice = await invoiceService.createInvoice(newInvoice as any);
+        if (selectedFile) {
+          try {
+            const fileUrl = await invoiceService.uploadInvoiceFile(selectedFile, createdInvoice.id);
+            await invoiceService.updateInvoice(createdInvoice.id, { fileUrl });
+          } catch (uploadErr) {
+            console.error('Failed to upload file to Supabase Storage:', uploadErr);
+            alert('Invoice data saved, but PDF upload failed. Please check Supabase Storage configuration.');
+          }
+        }
       } catch (err) {
         console.error('Failed to create invoice in Supabase:', err);
+        alert('Failed to save invoice data.');
       }
     } else {
       const invWithId = { ...newInvoice, id: `INV-${Date.now()}` } as Invoice;
@@ -478,13 +571,13 @@ export default function App() {
               />
             </div>
             <div className="space-y-1.5">
-              <label className="text-xs font-bold text-[#8c909a] uppercase tracking-wider">Last Name</label>
+              <label className="text-xs font-bold text-[#8c909a] uppercase tracking-wider">Password</label>
               <input 
                 type="password" 
                 required
                 value={loginLastName}
                 onChange={(e) => setLoginLastName(e.target.value)}
-                placeholder="Enter your last name"
+                placeholder="Enter your password"
                 className="w-full bg-[#faf9f7] border border-[#e0dbd3] rounded-xl px-4 py-3 text-sm outline-none focus:border-[#2a5f9e] transition-all"
               />
             </div>
@@ -549,16 +642,19 @@ export default function App() {
               <span>Sign Out</span>
             </button>
             
-            <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-full bg-[#c9a84c] flex items-center justify-center text-[11px] font-bold text-[#1a1200]">
-              {currentUser.initials}
-            </div>
-            <div className="min-w-0">
-              <div className="text-xs font-medium text-[#e8e5df] truncate">{currentUser.name}</div>
-              <div className="text-[10px] text-[#6b6e76] truncate">{currentUser.role.replace(/_/g, ' ')}</div>
-            </div>
+            <button 
+              onClick={() => setIsChangePasswordModalOpen(true)}
+              className="w-full flex items-center gap-3 group text-left"
+            >
+              <div className="w-8 h-8 rounded-full bg-[#c9a84c] flex items-center justify-center text-[11px] font-bold text-[#1a1200] group-hover:ring-2 ring-[#c9a84c]/30 transition-all">
+                {currentUser.initials}
+              </div>
+              <div className="min-w-0">
+                <div className="text-xs font-medium text-[#e8e5df] truncate group-hover:text-[#c9a84c] transition-colors">{currentUser.name}</div>
+                <div className="text-[10px] text-[#6b6e76] truncate">{currentUser.role.replace(/_/g, ' ')}</div>
+              </div>
+            </button>
           </div>
-        </div>
       </aside>
 
       {/* Main Content */}
@@ -573,46 +669,13 @@ export default function App() {
           )}
           <div className="flex-1" />
           
-          {currentUser && (currentUser.role === 'AP_SUPERVISOR' || currentUser.role === 'AP_COORDINATOR') && (
+          {currentUser && (currentUser.role === 'AP_SUPERVISOR' || currentUser.role === 'AP_COORDINATOR' || currentUser.id === 'it') && (
             <button 
-              onClick={async () => {
-                if (!confirm('This will send a reminder email to all users with pending invoices. Continue?')) return;
-                try {
-                  const res = await fetch('/api/trigger-reminders', { method: 'POST' });
-                  if (res.ok) alert('Reminders sent successfully!');
-                  else alert('Failed to send reminders. Check if RESEND_API_KEY is configured.');
-                } catch (err) {
-                  console.error(err);
-                  alert('Error sending reminders.');
-                }
-              }}
-              className="bg-[#059669] hover:bg-[#047857] text-white text-[10px] font-medium px-3 py-1.5 rounded-md transition-colors flex items-center gap-1.5"
-            >
-              <Send size={12} />
-              <span>Send Reminders</span>
-            </button>
-          )}
-
-          {currentUser && currentUser.id === 'it' && (
-            <button 
-              onClick={async () => {
-                try {
-                  const res = await fetch('/api/test-email', { 
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ email: currentUser.email, name: currentUser.name })
-                  });
-                  if (res.ok) alert('Test email sent to ' + currentUser.email);
-                  else alert('Failed to send test email.');
-                } catch (err) {
-                  console.error(err);
-                  alert('Error sending test email.');
-                }
-              }}
-              className="bg-[#7c3aed] hover:bg-[#6d28d9] text-white text-[10px] font-medium px-3 py-1.5 rounded-md transition-colors flex items-center gap-1.5"
+              onClick={() => setIsReminderModalOpen(true)}
+              className="bg-[#c9a84c] hover:bg-[#b09341] text-[#1a1200] text-[10px] font-bold px-3 py-1.5 rounded-md transition-colors flex items-center gap-1.5"
             >
               <Bell size={12} />
-              <span>Send Test Email</span>
+              <span>Send Reminders</span>
             </button>
           )}
 
@@ -633,11 +696,12 @@ export default function App() {
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -10 }}
               >
-                <div className="grid grid-cols-5 gap-3 mb-6">
+                <div className="grid grid-cols-6 gap-3 mb-6">
                   <StatCard label="Total" value={stats.total} sub="All invoices" active={!statusFilter} onClick={() => setStatusFilter('')} />
                   <StatCard label="Pending" value={stats.counts.PENDING} sub="Awaiting action" color="#d97706" active={statusFilter === 'PENDING'} onClick={() => setStatusFilter('PENDING')} />
                   <StatCard label="Approved" value={stats.counts.APPROVED} sub="Ready to pay" color="#2563eb" active={statusFilter === 'APPROVED'} onClick={() => setStatusFilter('APPROVED')} />
                   <StatCard label="On Hold" value={stats.counts.HOLD} sub="Needs review" color="#7c3aed" active={statusFilter === 'HOLD'} onClick={() => setStatusFilter('HOLD')} />
+                  <StatCard label="Denied" value={stats.counts.DENIED} sub="Rejected" color="#dc2626" active={statusFilter === 'DENIED'} onClick={() => setStatusFilter('DENIED')} />
                   <StatCard label="Paid" value={stats.counts.PAID} sub={`$${fmtAmt(stats.paidTotal)} total`} color="#059669" active={statusFilter === 'PAID'} onClick={() => setStatusFilter('PAID')} />
                 </div>
 
@@ -685,7 +749,6 @@ export default function App() {
                   <table className="w-full text-left border-collapse">
                     <thead>
                       <tr className="bg-[#faf9f7] text-[11px] text-[#8c909a] uppercase tracking-wider font-semibold">
-                        <th className="px-4 py-3 border-b border-[#e0dbd3]">Invoice</th>
                         <th className="px-4 py-3 border-b border-[#e0dbd3]">Vendor</th>
                         <th className="px-4 py-3 border-b border-[#e0dbd3]">Store</th>
                         <th className="px-4 py-3 border-b border-[#e0dbd3]">Amount</th>
@@ -698,7 +761,7 @@ export default function App() {
                     <tbody className="divide-y divide-[#ede9e3]">
                       {filteredInvoices.length === 0 ? (
                         <tr>
-                          <td colSpan={8} className="py-20 text-center">
+                          <td colSpan={7} className="py-20 text-center">
                             <div className="text-3xl opacity-20 mb-2">📋</div>
                             <div className="text-sm font-medium text-[#4a4e57]">No invoices found</div>
                             <div className="text-xs text-[#8c909a]">Try adjusting your filters</div>
@@ -708,13 +771,20 @@ export default function App() {
                         filteredInvoices.map(inv => (
                           <tr key={inv.id} className="hover:bg-[#faf9f7] cursor-pointer transition-colors group" onClick={() => setActiveInvoice(inv)}>
                             <td className="px-4 py-3">
-                              <div className="font-mono text-[11px] text-[#8c909a]">{inv.id}</div>
-                              {inv.invoiceNumber && <div className="text-[10px] text-[#8c909a] mt-0.5">{inv.invoiceNumber}</div>}
+                              <div className="font-medium text-sm">{inv.vendor}</div>
+                              <div className="font-mono text-[10px] text-[#8c909a] mt-0.5">{inv.id}</div>
                             </td>
-                            <td className="px-4 py-3 font-medium text-sm">{inv.vendor}</td>
                             <td className="px-4 py-3">
                               <div className="flex items-center gap-2">
-                                <img src={getStoreLogo(inv.storeName)} className="w-7 h-7 rounded bg-[#faf9f7] p-0.5 object-contain" alt="" />
+                                <img 
+                                  src={getStoreLogo(inv.storeName)} 
+                                  className="w-7 h-7 rounded bg-[#faf9f7] p-0.5 object-contain" 
+                                  alt="" 
+                                  referrerPolicy="no-referrer"
+                                  onError={(e) => {
+                                    (e.target as HTMLImageElement).src = `https://api.dicebear.com/7.x/initials/svg?seed=${inv.storeName}&backgroundColor=2a5f9e&fontFamily=Inter&fontWeight=700`;
+                                  }}
+                                />
                                 <div>
                                   <div className="text-[12.5px] leading-tight">{inv.storeName}</div>
                                   <div className="text-[10px] text-[#8c909a]">{inv.region}</div>
@@ -971,7 +1041,7 @@ export default function App() {
               initial={{ scale: 0.95, opacity: 0, y: 20 }}
               animate={{ scale: 1, opacity: 1, y: 0 }}
               exit={{ scale: 0.95, opacity: 0, y: 20 }}
-              className="bg-white rounded-2xl w-full max-w-5xl h-full max-h-[800px] shadow-2xl overflow-hidden flex flex-col"
+              className="bg-white rounded-2xl w-full max-w-5xl h-full max-h-[90vh] shadow-2xl overflow-hidden flex flex-col"
               onClick={e => e.stopPropagation()}
             >
               <header className="px-6 py-4 border-b border-[#e0dbd3] flex items-center gap-3">
@@ -985,20 +1055,103 @@ export default function App() {
 
               <div className="flex-1 flex overflow-hidden">
                 {/* PDF Preview Area */}
-                <div className="flex-1 bg-[#faf9f7] border-r border-[#e0dbd3] flex flex-col items-center justify-center p-10 gap-6">
-                  <div className="w-full max-w-md aspect-[8.5/11] bg-white border border-[#e0dbd3] rounded-lg shadow-sm flex flex-col items-center justify-center gap-3 text-[#8c909a]">
-                    <FileText size={48} strokeWidth={1} />
-                    <span className="text-xs font-medium">{activeInvoice.invoiceNumber || activeInvoice.id}.pdf</span>
-                    <span className="text-[10px] opacity-60">(PDF Preview available in production)</span>
-                  </div>
-                  <button className="flex items-center gap-2 px-4 py-2 bg-white border border-[#e0dbd3] rounded-lg text-xs font-medium hover:bg-[#faf9f7] transition-colors">
-                    <Download size={14} />
-                    Download Full PDF
-                  </button>
+                <div className="flex-1 bg-[#faf9f7] border-r border-[#e0dbd3] flex flex-col items-center justify-center p-10 gap-6 overflow-y-auto">
+                  {pdfPreviewUrl || activeInvoice.fileUrl ? (
+                    <div className="w-full max-w-2xl bg-white border border-[#e0dbd3] rounded-lg shadow-sm overflow-hidden">
+                      <img src={pdfPreviewUrl || activeInvoice.fileUrl} alt="Invoice Preview" className="w-full h-auto" referrerPolicy="no-referrer" />
+                    </div>
+                  ) : (
+                    <div className="w-full max-w-md aspect-[8.5/11] bg-white border border-[#e0dbd3] rounded-lg shadow-sm flex flex-col items-center justify-center gap-3 text-[#8c909a]">
+                      <FileText size={48} strokeWidth={1} />
+                      <span className="text-xs font-medium">{activeInvoice.invoiceNumber || activeInvoice.id}.pdf</span>
+                      <div className="text-center px-6">
+                        <span className="text-[10px] opacity-60 block mb-1">Preview not available.</span>
+                        <span className="text-[9px] opacity-40">Ensure Supabase Storage bucket "invoices" is public.</span>
+                      </div>
+                    </div>
+                  )}
+                  {activeInvoice.fileUrl && (
+                    <a 
+                      href={activeInvoice.fileUrl} 
+                      target="_blank" 
+                      rel="noopener noreferrer"
+                      className="flex items-center gap-2 px-4 py-2 bg-white border border-[#e0dbd3] rounded-lg text-xs font-medium hover:bg-[#faf9f7] transition-colors"
+                    >
+                      <Download size={14} />
+                      Download Full PDF
+                    </a>
+                  )}
+                  {!activeInvoice.fileUrl && (
+                    <button className="flex items-center gap-2 px-4 py-2 bg-white border border-[#e0dbd3] rounded-lg text-xs font-medium opacity-50 cursor-not-allowed">
+                      <Download size={14} />
+                      Download Not Available
+                    </button>
+                  )}
                   
-                  <div className="w-full max-w-md mt-4">
+                  <div className="w-full max-w-md mt-4 space-y-6">
+                    {/* Action Area */}
+                    {canUserAct(currentUser, activeInvoice) && (
+                      <div className="bg-white border border-[#c9a84c]/30 rounded-xl p-4 shadow-sm">
+                        <div className="text-[10px] uppercase tracking-widest font-bold text-[#c9a84c] mb-3">Take Action</div>
+                        <div className="grid grid-cols-3 gap-2 mb-4">
+                          <button 
+                            onClick={() => setSelectedAction('APPROVED')}
+                            className={`flex flex-col items-center gap-1 p-2 rounded-lg border transition-all ${selectedAction === 'APPROVED' ? 'bg-[#ecfdf5] border-[#059669] text-[#059669]' : 'border-[#e0dbd3] hover:bg-[#faf9f7]'}`}
+                          >
+                            <CheckCircle2 size={18} />
+                            <span className="text-[10px] font-bold">Approve</span>
+                          </button>
+                          <button 
+                            onClick={() => setSelectedAction('DENIED')}
+                            className={`flex flex-col items-center gap-1 p-2 rounded-lg border transition-all ${selectedAction === 'DENIED' ? 'bg-[#fef2f2] border-[#dc2626] text-[#dc2626]' : 'border-[#e0dbd3] hover:bg-[#faf9f7]'}`}
+                          >
+                            <XCircle size={18} />
+                            <span className="text-[10px] font-bold">Deny</span>
+                          </button>
+                          <button 
+                            onClick={() => setSelectedAction('HOLD')}
+                            className={`flex flex-col items-center gap-1 p-2 rounded-lg border transition-all ${selectedAction === 'HOLD' ? 'bg-[#f5f3ff] border-[#7c3aed] text-[#7c3aed]' : 'border-[#e0dbd3] hover:bg-[#faf9f7]'}`}
+                          >
+                            <PauseCircle size={18} />
+                            <span className="text-[10px] font-bold">Hold</span>
+                          </button>
+                        </div>
+
+                        {selectedAction && (
+                          <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} className="space-y-3">
+                            <textarea 
+                              placeholder={`Add a note for ${selectedAction.toLowerCase()}...`}
+                              className="w-full bg-[#faf9f7] border border-[#e0dbd3] rounded-lg p-2 text-xs outline-none focus:border-[#2a5f9e] min-h-[60px]"
+                              value={newComment}
+                              onChange={(e) => setNewComment(e.target.value)}
+                            />
+                            <button 
+                              onClick={() => handleAction(selectedAction, newComment)}
+                              className="w-full bg-[#2a5f9e] text-white py-2 rounded-lg text-xs font-bold hover:bg-[#1d4a7d] transition-all"
+                            >
+                              Save Action
+                            </button>
+                          </motion.div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Revoke Logic */}
+                    {activeInvoice.approvalCycles[activeInvoice.approvalCycles.length - 1].steps.some(s => s.userId === currentUser.id && s.action === 'APPROVED') && (
+                      <div className="bg-[#fef2f2] border border-[#dc2626]/20 rounded-xl p-4">
+                        <div className="text-[10px] uppercase tracking-widest font-bold text-[#dc2626] mb-2">Revoke Approval</div>
+                        <p className="text-[10px] text-[#6b6e76] mb-3">You have already approved this invoice. You can revoke your approval if it hasn't been paid yet.</p>
+                        <button 
+                          onClick={handleRevoke}
+                          className="w-full bg-white border border-[#dc2626] text-[#dc2626] py-2 rounded-lg text-xs font-bold hover:bg-[#fef2f2] transition-all"
+                        >
+                          Revoke My Approval
+                        </button>
+                      </div>
+                    )}
+
                     <div className="text-[10px] uppercase tracking-widest font-bold text-[#8c909a] mb-4">Approval Chain</div>
-                    <div className="space-y-0 relative">
+                    <div className="space-y-0 relative mb-8">
                       {activeInvoice.requiredApprovals.map((step, i) => {
                         const isApproved = activeInvoice.approvalCycles.some(c => c.steps.some(s => s.stage === step.role && s.action === 'APPROVED'));
                         const isCurrent = activeInvoice.currentStage === step.role;
@@ -1020,6 +1173,48 @@ export default function App() {
                           </div>
                         );
                       }).reverse()}
+                    </div>
+
+                    <div className="text-[10px] uppercase tracking-widest font-bold text-[#8c909a] mb-4">Approval History</div>
+                    <div className="space-y-3">
+                      {activeInvoice.approvalCycles.flatMap(c => c.steps).length === 0 ? (
+                        <div className="text-[10px] text-[#8c909a] italic">No actions taken yet.</div>
+                      ) : (
+                        activeInvoice.approvalCycles.flatMap(c => c.steps).sort((a, b) => b.ts - a.ts).map((step, i) => {
+                          const user = USERS[step.userId];
+                          const initials = user ? user.initials : '??';
+                          const name = user ? user.name : 'Unknown User';
+                          return (
+                            <div key={i} className="flex gap-3 p-3 rounded-lg bg-[#faf9f7] border border-[#e0dbd3]">
+                              <div className="w-8 h-8 rounded-full bg-[#2a5f9e]/10 flex items-center justify-center text-[10px] font-bold text-[#2a5f9e]">
+                                {initials}
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center justify-between gap-2">
+                                  <div className="text-[11px] font-bold truncate">{name}</div>
+                                  <div className="text-[9px] text-[#8c909a] whitespace-nowrap">{new Date(step.ts).toLocaleString()}</div>
+                                </div>
+                                <div className="flex items-center gap-2 mt-1">
+                                  <span className={`text-[9px] px-1.5 py-0.5 rounded-full font-bold uppercase ${
+                                    step.action === 'APPROVED' ? 'bg-[#ecfdf5] text-[#059669]' :
+                                    step.action === 'DENIED' ? 'bg-[#fef2f2] text-[#dc2626]' :
+                                    step.action === 'HOLD' ? 'bg-[#f5f3ff] text-[#7c3aed]' :
+                                    'bg-[#fefce8] text-[#d97706]'
+                                  }`}>
+                                    {step.action}
+                                  </span>
+                                  <span className="text-[10px] text-[#6b6e76] italic">— {step.stage.replace(/_/g, ' ')}</span>
+                                </div>
+                                {step.comment && (
+                                  <div className="mt-2 text-[11px] text-[#1c1e22] bg-white p-2 rounded border border-[#e0dbd3]">
+                                    {step.comment}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })
+                      )}
                     </div>
                   </div>
                 </div>
@@ -1084,13 +1279,116 @@ export default function App() {
                         className="flex-1 bg-[#faf9f7] border border-[#e0dbd3] rounded-xl p-2.5 text-xs outline-none focus:border-[#2a5f9e] resize-none"
                         placeholder="Add a comment..."
                         rows={2}
+                        value={newComment}
+                        onChange={(e) => setNewComment(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && !e.shiftKey) {
+                            e.preventDefault();
+                            handleAddComment();
+                          }
+                        }}
                       />
-                      <button className="self-end p-2.5 bg-[#2a5f9e] text-white rounded-xl hover:bg-[#1d4a7d] transition-colors">
+                      <button 
+                        onClick={handleAddComment}
+                        disabled={isAddingComment || !newComment.trim()}
+                        className="self-end p-2.5 bg-[#2a5f9e] text-white rounded-xl hover:bg-[#1d4a7d] transition-colors disabled:opacity-50"
+                      >
                         <Send size={14} />
                       </button>
                     </div>
                   </div>
                 </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Reminder Modal */}
+      <AnimatePresence>
+        {isReminderModalOpen && (
+          <motion.div 
+            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center p-4"
+            onClick={() => setIsReminderModalOpen(false)}
+          >
+            <motion.div 
+              initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-white rounded-2xl w-full max-w-lg p-6 shadow-2xl"
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between mb-6">
+                <h3 className="text-lg font-bold">Email Reminder Template</h3>
+                <button onClick={() => setIsReminderModalOpen(false)}><XCircle size={20} className="text-[#8c909a]" /></button>
+              </div>
+              
+              <div className="bg-[#faf9f7] border border-[#e0dbd3] rounded-xl p-4 font-mono text-xs whitespace-pre-wrap mb-6">
+{`Subject: Weekly Invoice Approval Reminder
+
+Hello Team,
+
+This is a friendly reminder that you have pending invoices awaiting your approval in the Invoice Tracker.
+
+Please log in to review and take action:
+https://dossaniparadise.github.io/invoice-tracker/
+
+Thank you,
+Accounting Team`}
+              </div>
+
+              <button 
+                onClick={() => {
+                  navigator.clipboard.writeText(`Subject: Weekly Invoice Approval Reminder\n\nHello Team,\n\nThis is a friendly reminder that you have pending invoices awaiting your approval in the Invoice Tracker.\n\nPlease log in to review and take action:\nhttps://dossaniparadise.github.io/invoice-tracker/\n\nThank you,\nAccounting Team`);
+                  alert('Template copied to clipboard!');
+                }}
+                className="w-full bg-[#2a5f9e] text-white py-3 rounded-xl font-bold hover:bg-[#1d4a7d] transition-all"
+              >
+                Copy to Clipboard
+              </button>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Change Password Modal */}
+      <AnimatePresence>
+        {isChangePasswordModalOpen && (
+          <motion.div 
+            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center p-4"
+            onClick={() => setIsChangePasswordModalOpen(false)}
+          >
+            <motion.div 
+              initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-white rounded-2xl w-full max-w-md p-6 shadow-2xl"
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between mb-6">
+                <h3 className="text-lg font-bold">Change Password</h3>
+                <button onClick={() => setIsChangePasswordModalOpen(false)}><XCircle size={20} className="text-[#8c909a]" /></button>
+              </div>
+              
+              <div className="space-y-4">
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-[#8c909a] uppercase tracking-wider">New Password</label>
+                  <input 
+                    type="password" 
+                    className="w-full bg-[#faf9f7] border border-[#e0dbd3] rounded-xl px-4 py-3 text-sm outline-none focus:border-[#2a5f9e] transition-all"
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    placeholder="Enter new password"
+                  />
+                </div>
+                <button 
+                  onClick={() => {
+                    alert('Password updated successfully! (Mock)');
+                    setIsChangePasswordModalOpen(false);
+                    setNewPassword('');
+                  }}
+                  className="w-full bg-[#2a5f9e] text-white py-3 rounded-xl font-bold hover:bg-[#1d4a7d] transition-all"
+                >
+                  Update Password
+                </button>
               </div>
             </motion.div>
           </motion.div>

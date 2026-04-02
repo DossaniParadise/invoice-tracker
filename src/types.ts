@@ -86,4 +86,5 @@ export interface Invoice {
   paidAt: number | null;
   archived: boolean;
   comments: Comment[];
+  fileUrl?: string;
 }

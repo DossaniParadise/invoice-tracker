@@ -37,6 +37,7 @@ const USERS: Record<string, any> = {
   claudia:     {id:'claudia',     name:'Claudia Fernandez', role:'AREA_COACH',          email:'claudia@dossaniparadise.com'},
   steve:       {id:'steve',       name:'Steve Cardone',     role:'AREA_COACH',          email:'steve@dossaniparadise.com'},
   elizabeth:   {id:'elizabeth',   name:'Elizabeth Cruz',    role:'AREA_COACH',          email:'elizabeth@dossaniparadise.com'},
+  it:          {id:'it',          name:'IT Support',        role:'IT_COORDINATOR',      email:'it@dossaniparadise.com'},
 };
 
 const canUserAct = (user: any, invoice: any): boolean => {

@@ -25,6 +25,25 @@ export const invoiceService = {
     return data as Invoice;
   },
 
+  async uploadInvoiceFile(file: File, invoiceId: string) {
+    if (!supabase) throw new Error('Supabase not configured');
+    const fileExt = file.name.split('.').pop();
+    const fileName = `${invoiceId}-${Date.now()}.${fileExt}`;
+    const filePath = `${fileName}`;
+
+    const { error: uploadError } = await supabase.storage
+      .from('invoices')
+      .upload(filePath, file);
+
+    if (uploadError) throw uploadError;
+
+    const { data } = supabase.storage
+      .from('invoices')
+      .getPublicUrl(filePath);
+
+    return data.publicUrl;
+  },
+
   async updateInvoice(id: string, updates: Partial<Invoice>) {
     if (!supabase) throw new Error('Supabase not configured');
     const { data, error } = await supabase
