@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   LayoutDashboard, 
   Upload, 
@@ -132,6 +132,8 @@ export default function App() {
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [notifications, setNotifications] = useState<any[]>([]);
   const [activeInvoice, setActiveInvoice] = useState<Invoice | null>(null);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   
   // Filters
   const [statusFilter, setStatusFilter] = useState<string>('');
@@ -296,9 +298,28 @@ export default function App() {
     setActiveInvoice(updatedInvoice);
   };
 
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file && file.type === 'application/pdf') {
+      setSelectedFile(file);
+    } else if (file) {
+      alert('Please select a PDF file');
+    }
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    const file = e.dataTransfer.files?.[0];
+    if (file && file.type === 'application/pdf') {
+      setSelectedFile(file);
+    } else if (file) {
+      alert('Please drop a PDF file');
+    }
+  };
+
   const handleSubmitInvoice = async () => {
-    if (!uploadStoreId || !uploadVendor || !uploadAmount || !uploadDate) {
-      alert('Please fill all required fields');
+    if (!uploadStoreId || !uploadVendor || !uploadAmount || !uploadDate || !selectedFile) {
+      alert('Please fill all required fields and select a PDF file');
       return;
     }
 
@@ -348,6 +369,7 @@ export default function App() {
     setUploadAmount('');
     setUploadInvNum('');
     setUploadPoNum('');
+    setSelectedFile(null);
   };
 
   const handleLogin = (e: React.FormEvent) => {
@@ -649,10 +671,41 @@ export default function App() {
                 <div className="bg-white border border-[#e0dbd3] rounded-xl p-8 shadow-sm">
                   <div className="mb-8">
                     <label className="block text-xs font-medium text-[#4a4e57] mb-2 uppercase tracking-wider">PDF Document *</label>
-                    <div className="border-2 border-dashed border-[#e0dbd3] rounded-xl p-10 text-center cursor-pointer hover:border-[#2a5f9e] hover:bg-[#eaf1fb] transition-all group">
-                      <div className="text-4xl mb-3 group-hover:scale-110 transition-transform">📄</div>
-                      <p className="text-sm font-medium">Click to upload or drag & drop</p>
-                      <p className="text-[11px] text-[#8c909a] mt-1">PDF only · max 25 MB</p>
+                    <input 
+                      type="file" 
+                      ref={fileInputRef}
+                      onChange={handleFileChange}
+                      accept="application/pdf"
+                      className="hidden"
+                    />
+                    <div 
+                      onClick={() => fileInputRef.current?.click()}
+                      onDragOver={(e) => e.preventDefault()}
+                      onDrop={handleDrop}
+                      className={`border-2 border-dashed rounded-xl p-10 text-center cursor-pointer transition-all group ${
+                        selectedFile ? 'border-[#059669] bg-[#ecfdf5]' : 'border-[#e0dbd3] hover:border-[#2a5f9e] hover:bg-[#eaf1fb]'
+                      }`}
+                    >
+                      <div className="text-4xl mb-3 group-hover:scale-110 transition-transform">
+                        {selectedFile ? '✅' : '📄'}
+                      </div>
+                      <p className="text-sm font-medium">
+                        {selectedFile ? selectedFile.name : 'Click to upload or drag & drop'}
+                      </p>
+                      <p className="text-[11px] text-[#8c909a] mt-1">
+                        {selectedFile ? `${(selectedFile.size / 1024 / 1024).toFixed(2)} MB` : 'PDF only · max 25 MB'}
+                      </p>
+                      {selectedFile && (
+                        <button 
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSelectedFile(null);
+                          }}
+                          className="mt-3 text-[10px] text-[#dc2626] hover:underline"
+                        >
+                          Remove file
+                        </button>
+                      )}
                     </div>
                   </div>
 
