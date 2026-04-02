@@ -9,8 +9,6 @@ import {
   Upload, 
   Bell, 
   BarChart3, 
-  Moon, 
-  Sun, 
   ChevronRight, 
   CheckCircle2, 
   XCircle, 
@@ -131,7 +129,6 @@ export default function App() {
   const [loginError, setLoginError] = useState('');
   
   const [page, setPage] = useState<'dashboard' | 'upload' | 'notifications' | 'reports'>('dashboard');
-  const [theme, setTheme] = useState<'light' | 'dark'>('light');
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [notifications, setNotifications] = useState<any[]>([]);
   const [activeInvoice, setActiveInvoice] = useState<Invoice | null>(null);
@@ -162,7 +159,7 @@ export default function App() {
       setCurrentUserId(savedUser);
     }
 
-    const url = import.meta.env.VITE_SUPABASE_URL;
+    const url = 'https://ouwoicujgqxpnzjspwcz.supabase.co';
     const key = import.meta.env.VITE_SUPABASE_ANON_KEY;
     const configured = !!(url && key);
     setIsSupabaseConfigured(configured);
@@ -195,49 +192,9 @@ export default function App() {
   };
 
   const seedInvoices = () => {
-    const now = Date.now();
-    const d = (n: number) => now - n * 86400000;
-    
-    const initialInvoices: Invoice[] = [
-      {
-        id: 'INV-201', vendor: 'Sysco Foods', amount: 3200, invoiceNumber: 'SC-88231', poNumber: 'PO-2241',
-        date: '2025-03-01', storeId: 'cs-js1', storeName: 'Paradise Quick Stop #05', division: 'C-Store', region: 'East Texas',
-        acId: 'jennifer', directorId: 'rick_dir', status: 'APPROVED', currentStage: 'APPROVED',
-        requiredApprovals: buildApprovalChain(STORES.find(s => s.id === 'cs-js1')!, 3200),
-        approvalCycles: [{ cycle: 1, steps: [
-          { stage: 'AREA_COACH', userId: 'jennifer', action: 'APPROVED', ts: d(12), comment: 'Looks good' },
-          { stage: 'DIRECTOR', userId: 'rick_dir', action: 'APPROVED', ts: d(10), comment: '' },
-          { stage: 'VP', userId: 'sam', action: 'APPROVED', ts: d(8), comment: 'Approved.' },
-        ] }],
-        createdAt: d(14), updatedAt: d(8), createdBy: 'kathreen', paidAt: null, archived: false,
-        comments: [{ id: 'c1', userId: 'jennifer', text: 'Please attach the PO next time.', mentions: [], ts: d(11) }]
-      },
-      {
-        id: 'INV-202', vendor: 'Republic Services', amount: 450, invoiceNumber: 'RS-11092', poNumber: '',
-        date: '2025-03-05', storeId: 'cs-bw1', storeName: 'Paradise Quick Stop #12', division: 'C-Store', region: 'East Texas',
-        acId: 'betty', directorId: 'rick_dir', status: 'PENDING', currentStage: 'AREA_COACH',
-        requiredApprovals: buildApprovalChain(STORES.find(s => s.id === 'cs-bw1')!, 450),
-        approvalCycles: [{ cycle: 1, steps: [] }],
-        createdAt: d(9), updatedAt: d(9), createdBy: 'kathreen', paidAt: null, archived: false, comments: []
-      }
-    ];
-    setInvoices(initialInvoices);
-    
-    setNotifications([
-      { id: 'n1', title: 'INV-202 awaiting approval', sub: 'Republic Services $450.00 submitted', time: now - 3600000, read: false, invoiceId: 'INV-202' },
-      { id: 'n2', title: 'INV-201 fully approved', sub: 'Sysco Foods $3,200.00 ready to pay', time: now - 7200000, read: true, invoiceId: 'INV-201' }
-    ]);
+    setInvoices([]);
+    setNotifications([]);
   };
-
-  useEffect(() => {
-    const savedTheme = localStorage.getItem('theme') as 'light' | 'dark';
-    if (savedTheme) setTheme(savedTheme);
-  }, []);
-
-  useEffect(() => {
-    document.documentElement.classList.toggle('dark', theme === 'dark');
-    localStorage.setItem('theme', theme);
-  }, [theme]);
 
   const visibleStores = useMemo(() => {
     if (!currentUser) return [];
@@ -418,11 +375,11 @@ export default function App() {
 
   if (!currentUser) {
     return (
-      <div className="min-h-screen bg-[#f0ede8] dark:bg-[#0e1014] flex items-center justify-center p-4 font-sans">
+      <div className="min-h-screen bg-[#f0ede8] flex items-center justify-center p-4 font-sans">
         <motion.div 
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
-          className="bg-white dark:bg-[#1e2128] p-8 rounded-2xl shadow-xl w-full max-w-md border border-[#e0dbd3] dark:border-[#2a2e38]"
+          className="bg-white p-8 rounded-2xl shadow-xl w-full max-w-md border border-[#e0dbd3]"
         >
           <div className="flex flex-col items-center mb-8">
             <img src="https://raw.githubusercontent.com/DossaniParadise/invoice-tracker/main/logos/dpm-icon.png" className="w-16 h-16 rounded-xl mb-4 shadow-sm" alt="DPM" />
@@ -439,7 +396,7 @@ export default function App() {
                 value={loginFirstName}
                 onChange={(e) => setLoginFirstName(e.target.value)}
                 placeholder="Enter your first name"
-                className="w-full bg-[#faf9f7] dark:bg-[#161820] border border-[#e0dbd3] dark:border-[#2a2e38] rounded-xl px-4 py-3 text-sm outline-none focus:border-[#2a5f9e] transition-all"
+                className="w-full bg-[#faf9f7] border border-[#e0dbd3] rounded-xl px-4 py-3 text-sm outline-none focus:border-[#2a5f9e] transition-all"
               />
             </div>
             <div className="space-y-1.5">
@@ -450,7 +407,7 @@ export default function App() {
                 value={loginLastName}
                 onChange={(e) => setLoginLastName(e.target.value)}
                 placeholder="Enter your last name"
-                className="w-full bg-[#faf9f7] dark:bg-[#161820] border border-[#e0dbd3] dark:border-[#2a2e38] rounded-xl px-4 py-3 text-sm outline-none focus:border-[#2a5f9e] transition-all"
+                className="w-full bg-[#faf9f7] border border-[#e0dbd3] rounded-xl px-4 py-3 text-sm outline-none focus:border-[#2a5f9e] transition-all"
               />
             </div>
 
@@ -472,7 +429,7 @@ export default function App() {
             </button>
           </form>
           
-          <div className="mt-8 pt-6 border-t border-[#e0dbd3] dark:border-[#2a2e38] text-center">
+          <div className="mt-8 pt-6 border-t border-[#e0dbd3] text-center">
             <p className="text-[10px] text-[#8c909a] uppercase tracking-widest leading-relaxed">
               Authorized Personnel Only<br/>
               © 2025 Dossani Paradise Management
@@ -484,9 +441,9 @@ export default function App() {
   }
 
   return (
-    <div className="flex h-screen bg-[#f0ede8] dark:bg-[#0e1014] text-[#1c1e22] dark:text-[#e4e1da] font-sans overflow-hidden">
+    <div className="flex h-screen bg-[#f0ede8] text-[#1c1e22] font-sans overflow-hidden">
       {/* Sidebar */}
-      <aside className="w-56 bg-[#1a1c20] dark:bg-[#111318] flex flex-col h-full sticky top-0">
+      <aside className="w-56 bg-[#1a1c20] flex flex-col h-full sticky top-0">
         <div className="p-4 border-b border-white/5 flex items-center gap-3">
           <img src="https://raw.githubusercontent.com/DossaniParadise/invoice-tracker/main/logos/dpm-icon.png" className="w-8 h-8 rounded-md" alt="DPM" />
           <div>
@@ -506,14 +463,6 @@ export default function App() {
         </nav>
 
           <div className="p-4 border-t border-white/5 space-y-3">
-            <button 
-              onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
-              className="w-full flex items-center gap-2 px-3 py-2 rounded-lg border border-white/10 text-[#6b6e76] hover:text-[#e8e5df] hover:border-white/20 transition-all text-xs"
-            >
-              {theme === 'light' ? <Moon size={14} /> : <Sun size={14} />}
-              <span>Toggle theme</span>
-            </button>
-            
             <button 
               onClick={handleLogout}
               className="w-full flex items-center gap-2 px-3 py-2 rounded-lg border border-white/10 text-[#6b6e76] hover:text-[#dc2626] hover:border-[#dc2626]/20 transition-all text-xs"
@@ -536,7 +485,7 @@ export default function App() {
 
       {/* Main Content */}
       <main className="flex-1 flex flex-col min-w-0 overflow-auto">
-        <header className="h-14 bg-white dark:bg-[#1e2128] border-b border-[#e0dbd3] dark:border-[#2a2e38] px-6 flex items-center gap-4 sticky top-0 z-10">
+        <header className="h-14 bg-white border-b border-[#e0dbd3] px-6 flex items-center gap-4 sticky top-0 z-10">
           <span className="text-sm font-semibold tracking-tight capitalize">{page}</span>
           {!isSupabaseConfigured && (
             <div className="bg-[#fdf6e3] text-[#92650a] text-[10px] px-2 py-1 rounded border border-[#c9a84c]/30 flex items-center gap-2">
@@ -571,9 +520,9 @@ export default function App() {
                   <StatCard label="Paid" value={stats.counts.PAID} sub={`$${fmtAmt(stats.paidTotal)} total`} color="#059669" active={statusFilter === 'PAID'} onClick={() => setStatusFilter('PAID')} />
                 </div>
 
-                <div className="bg-white dark:bg-[#1e2128] border border-[#e0dbd3] dark:border-[#2a2e38] rounded-xl p-3 mb-5 flex flex-wrap items-center gap-3">
+                <div className="bg-white border border-[#e0dbd3] rounded-xl p-3 mb-5 flex flex-wrap items-center gap-3">
                   <FilterGroup label="Status">
-                    <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="bg-[#faf9f7] dark:bg-[#161820] border border-[#e0dbd3] dark:border-[#2a2e38] rounded-md px-2 py-1 text-xs outline-none">
+                    <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="bg-[#faf9f7] border border-[#e0dbd3] rounded-md px-2 py-1 text-xs outline-none">
                       <option value="">All</option>
                       <option value="PENDING">Pending</option>
                       <option value="APPROVED">Approved</option>
@@ -582,18 +531,18 @@ export default function App() {
                       <option value="PAID">Paid</option>
                     </select>
                   </FilterGroup>
-                  <div className="w-px h-4 bg-[#e0dbd3] dark:bg-[#2a2e38]" />
+                  <div className="w-px h-4 bg-[#e0dbd3]" />
                   <FilterGroup label="Division">
-                    <select value={divisionFilter} onChange={(e) => setDivisionFilter(e.target.value)} className="bg-[#faf9f7] dark:bg-[#161820] border border-[#e0dbd3] dark:border-[#2a2e38] rounded-md px-2 py-1 text-xs outline-none">
+                    <select value={divisionFilter} onChange={(e) => setDivisionFilter(e.target.value)} className="bg-[#faf9f7] border border-[#e0dbd3] rounded-md px-2 py-1 text-xs outline-none">
                       <option value="">All</option>
                       <option value="C-Store">C-Store</option>
                       <option value="Fast Food">Fast Food</option>
                       <option value="Car Wash">Car Wash</option>
                     </select>
                   </FilterGroup>
-                  <div className="w-px h-4 bg-[#e0dbd3] dark:bg-[#2a2e38]" />
+                  <div className="w-px h-4 bg-[#e0dbd3]" />
                   <FilterGroup label="Store">
-                    <select value={storeFilter} onChange={(e) => setStoreFilter(e.target.value)} className="bg-[#faf9f7] dark:bg-[#161820] border border-[#e0dbd3] dark:border-[#2a2e38] rounded-md px-2 py-1 text-xs outline-none">
+                    <select value={storeFilter} onChange={(e) => setStoreFilter(e.target.value)} className="bg-[#faf9f7] border border-[#e0dbd3] rounded-md px-2 py-1 text-xs outline-none">
                       <option value="">All Stores</option>
                       {visibleStores.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
                     </select>
@@ -606,26 +555,26 @@ export default function App() {
                       placeholder="Search vendor, invoice #..." 
                       value={searchFilter}
                       onChange={(e) => setSearchFilter(e.target.value)}
-                      className="bg-[#faf9f7] dark:bg-[#161820] border border-[#e0dbd3] dark:border-[#2a2e38] rounded-md pl-8 pr-3 py-1 text-xs outline-none w-48 focus:border-[#2a5f9e]"
+                      className="bg-[#faf9f7] border border-[#e0dbd3] rounded-md pl-8 pr-3 py-1 text-xs outline-none w-48 focus:border-[#2a5f9e]"
                     />
                   </div>
                 </div>
 
-                <div className="bg-white dark:bg-[#1e2128] border border-[#e0dbd3] dark:border-[#2a2e38] rounded-xl overflow-hidden shadow-sm">
+                <div className="bg-white border border-[#e0dbd3] rounded-xl overflow-hidden shadow-sm">
                   <table className="w-full text-left border-collapse">
                     <thead>
-                      <tr className="bg-[#faf9f7] dark:bg-[#161820] text-[11px] text-[#8c909a] uppercase tracking-wider font-semibold">
-                        <th className="px-4 py-3 border-b border-[#e0dbd3] dark:border-[#2a2e38]">Invoice</th>
-                        <th className="px-4 py-3 border-b border-[#e0dbd3] dark:border-[#2a2e38]">Vendor</th>
-                        <th className="px-4 py-3 border-b border-[#e0dbd3] dark:border-[#2a2e38]">Store</th>
-                        <th className="px-4 py-3 border-b border-[#e0dbd3] dark:border-[#2a2e38]">Amount</th>
-                        <th className="px-4 py-3 border-b border-[#e0dbd3] dark:border-[#2a2e38]">Date</th>
-                        <th className="px-4 py-3 border-b border-[#e0dbd3] dark:border-[#2a2e38]">Status</th>
-                        <th className="px-4 py-3 border-b border-[#e0dbd3] dark:border-[#2a2e38]">Stage</th>
-                        <th className="px-4 py-3 border-b border-[#e0dbd3] dark:border-[#2a2e38]"></th>
+                      <tr className="bg-[#faf9f7] text-[11px] text-[#8c909a] uppercase tracking-wider font-semibold">
+                        <th className="px-4 py-3 border-b border-[#e0dbd3]">Invoice</th>
+                        <th className="px-4 py-3 border-b border-[#e0dbd3]">Vendor</th>
+                        <th className="px-4 py-3 border-b border-[#e0dbd3]">Store</th>
+                        <th className="px-4 py-3 border-b border-[#e0dbd3]">Amount</th>
+                        <th className="px-4 py-3 border-b border-[#e0dbd3]">Date</th>
+                        <th className="px-4 py-3 border-b border-[#e0dbd3]">Status</th>
+                        <th className="px-4 py-3 border-b border-[#e0dbd3]">Stage</th>
+                        <th className="px-4 py-3 border-b border-[#e0dbd3]"></th>
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-[#ede9e3] dark:divide-[#222530]">
+                    <tbody className="divide-y divide-[#ede9e3]">
                       {filteredInvoices.length === 0 ? (
                         <tr>
                           <td colSpan={8} className="py-20 text-center">
@@ -636,7 +585,7 @@ export default function App() {
                         </tr>
                       ) : (
                         filteredInvoices.map(inv => (
-                          <tr key={inv.id} className="hover:bg-[#faf9f7] dark:hover:bg-[#161820] cursor-pointer transition-colors group" onClick={() => setActiveInvoice(inv)}>
+                          <tr key={inv.id} className="hover:bg-[#faf9f7] cursor-pointer transition-colors group" onClick={() => setActiveInvoice(inv)}>
                             <td className="px-4 py-3">
                               <div className="font-mono text-[11px] text-[#8c909a]">{inv.id}</div>
                               {inv.invoiceNumber && <div className="text-[10px] text-[#8c909a] mt-0.5">{inv.invoiceNumber}</div>}
@@ -644,7 +593,7 @@ export default function App() {
                             <td className="px-4 py-3 font-medium text-sm">{inv.vendor}</td>
                             <td className="px-4 py-3">
                               <div className="flex items-center gap-2">
-                                <img src={getStoreLogo(inv.storeName)} className="w-7 h-7 rounded bg-[#faf9f7] dark:bg-[#161820] p-0.5 object-contain" alt="" />
+                                <img src={getStoreLogo(inv.storeName)} className="w-7 h-7 rounded bg-[#faf9f7] p-0.5 object-contain" alt="" />
                                 <div>
                                   <div className="text-[12.5px] leading-tight">{inv.storeName}</div>
                                   <div className="text-[10px] text-[#8c909a]">{inv.region}</div>
@@ -658,13 +607,13 @@ export default function App() {
                             </td>
                             <td className="px-4 py-3">
                               <div className="flex items-center gap-2">
-                                <span className="px-2 py-0.5 bg-[#faf9f7] dark:bg-[#161820] border border-[#e0dbd3] dark:border-[#2a2e38] rounded-full text-[10px] font-medium text-[#8c909a]">
+                                <span className="px-2 py-0.5 bg-[#faf9f7] border border-[#e0dbd3] rounded-full text-[10px] font-medium text-[#8c909a]">
                                   {inv.currentStage}
                                 </span>
                                 <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
-                                  inv.division === 'C-Store' ? 'bg-[#fdf6e3] text-[#92650a] dark:bg-[#c9a84c]/15 dark:text-[#c9a84c]' : 
-                                  inv.division === 'Fast Food' ? 'bg-[#fef2f2] text-[#991b1b] dark:bg-[#f87171]/15 dark:text-[#f87171]' :
-                                  'bg-[#ecfdf5] text-[#059669] dark:bg-[#34d399]/15 dark:text-[#34d399]'
+                                  inv.division === 'C-Store' ? 'bg-[#fdf6e3] text-[#92650a]' : 
+                                  inv.division === 'Fast Food' ? 'bg-[#fef2f2] text-[#991b1b]' :
+                                  'bg-[#ecfdf5] text-[#059669]'
                                 }`}>
                                   {inv.division === 'C-Store' ? 'C' : inv.division === 'Fast Food' ? 'FF' : 'CW'}
                                 </span>
@@ -691,16 +640,16 @@ export default function App() {
                 className="max-w-3xl mx-auto"
               >
                 <div className="flex items-center gap-4 mb-6">
-                  <button onClick={() => setPage('dashboard')} className="p-2 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg transition-colors">
+                  <button onClick={() => setPage('dashboard')} className="p-2 hover:bg-black/5 rounded-lg transition-colors">
                     <ArrowLeft size={18} />
                   </button>
                   <h1 className="text-xl font-semibold tracking-tight">Upload Invoice</h1>
                 </div>
 
-                <div className="bg-white dark:bg-[#1e2128] border border-[#e0dbd3] dark:border-[#2a2e38] rounded-xl p-8 shadow-sm">
+                <div className="bg-white border border-[#e0dbd3] rounded-xl p-8 shadow-sm">
                   <div className="mb-8">
                     <label className="block text-xs font-medium text-[#4a4e57] mb-2 uppercase tracking-wider">PDF Document *</label>
-                    <div className="border-2 border-dashed border-[#e0dbd3] dark:border-[#2a2e38] rounded-xl p-10 text-center cursor-pointer hover:border-[#2a5f9e] hover:bg-[#eaf1fb] dark:hover:bg-[#2a5f9e]/10 transition-all group">
+                    <div className="border-2 border-dashed border-[#e0dbd3] rounded-xl p-10 text-center cursor-pointer hover:border-[#2a5f9e] hover:bg-[#eaf1fb] transition-all group">
                       <div className="text-4xl mb-3 group-hover:scale-110 transition-transform">📄</div>
                       <p className="text-sm font-medium">Click to upload or drag & drop</p>
                       <p className="text-[11px] text-[#8c909a] mt-1">PDF only · max 25 MB</p>
@@ -713,7 +662,7 @@ export default function App() {
                       <select 
                         value={uploadStoreId}
                         onChange={(e) => setUploadStoreId(e.target.value)}
-                        className="w-full bg-[#faf9f7] dark:bg-[#161820] border border-[#e0dbd3] dark:border-[#2a2e38] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#2a5f9e]"
+                        className="w-full bg-[#faf9f7] border border-[#e0dbd3] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#2a5f9e]"
                       >
                         <option value="">Select store...</option>
                         {visibleStores.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
@@ -726,7 +675,7 @@ export default function App() {
                         value={uploadVendor}
                         onChange={(e) => setUploadVendor(e.target.value)}
                         placeholder="e.g. Sysco Foods" 
-                        className="w-full bg-[#faf9f7] dark:bg-[#161820] border border-[#e0dbd3] dark:border-[#2a2e38] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#2a5f9e]" 
+                        className="w-full bg-[#faf9f7] border border-[#e0dbd3] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#2a5f9e]" 
                       />
                     </div>
                     <div className="space-y-1.5">
@@ -735,7 +684,7 @@ export default function App() {
                         type="date" 
                         value={uploadDate}
                         onChange={(e) => setUploadDate(e.target.value)}
-                        className="w-full bg-[#faf9f7] dark:bg-[#161820] border border-[#e0dbd3] dark:border-[#2a2e38] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#2a5f9e]" 
+                        className="w-full bg-[#faf9f7] border border-[#e0dbd3] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#2a5f9e]" 
                       />
                     </div>
                     <div className="space-y-1.5">
@@ -745,13 +694,13 @@ export default function App() {
                         value={uploadAmount}
                         onChange={(e) => setUploadAmount(e.target.value)}
                         placeholder="0.00" 
-                        className="w-full bg-[#faf9f7] dark:bg-[#161820] border border-[#e0dbd3] dark:border-[#2a2e38] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#2a5f9e]" 
+                        className="w-full bg-[#faf9f7] border border-[#e0dbd3] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#2a5f9e]" 
                       />
                     </div>
                   </div>
 
                   <div className="flex justify-end gap-3 mt-10">
-                    <button onClick={() => setPage('dashboard')} className="px-4 py-2 text-sm font-medium text-[#4a4e57] hover:bg-black/5 dark:hover:bg-white/5 rounded-lg transition-colors">Cancel</button>
+                    <button onClick={() => setPage('dashboard')} className="px-4 py-2 text-sm font-medium text-[#4a4e57] hover:bg-black/5 rounded-lg transition-colors">Cancel</button>
                     <button 
                       onClick={handleSubmitInvoice}
                       className="px-6 py-2 bg-[#2a5f9e] hover:bg-[#1d4a7d] text-white text-sm font-medium rounded-lg transition-colors shadow-sm"
@@ -780,27 +729,27 @@ export default function App() {
               initial={{ scale: 0.95, opacity: 0, y: 20 }}
               animate={{ scale: 1, opacity: 1, y: 0 }}
               exit={{ scale: 0.95, opacity: 0, y: 20 }}
-              className="bg-white dark:bg-[#1e2128] rounded-2xl w-full max-w-5xl h-full max-h-[800px] shadow-2xl overflow-hidden flex flex-col"
+              className="bg-white rounded-2xl w-full max-w-5xl h-full max-h-[800px] shadow-2xl overflow-hidden flex flex-col"
               onClick={e => e.stopPropagation()}
             >
-              <header className="px-6 py-4 border-b border-[#e0dbd3] dark:border-[#2a2e38] flex items-center gap-3">
+              <header className="px-6 py-4 border-b border-[#e0dbd3] flex items-center gap-3">
                 <h2 className="text-base font-semibold tracking-tight">{activeInvoice.id} — {activeInvoice.vendor}</h2>
                 <Badge status={activeInvoice.status} />
                 <div className="flex-1" />
-                <button onClick={() => setActiveInvoice(null)} className="p-2 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg transition-colors">
+                <button onClick={() => setActiveInvoice(null)} className="p-2 hover:bg-black/5 rounded-lg transition-colors">
                   <XCircle size={20} className="text-[#8c909a]" />
                 </button>
               </header>
 
               <div className="flex-1 flex overflow-hidden">
                 {/* PDF Preview Area */}
-                <div className="flex-1 bg-[#faf9f7] dark:bg-[#161820] border-r border-[#e0dbd3] dark:border-[#2a2e38] flex flex-col items-center justify-center p-10 gap-6">
-                  <div className="w-full max-w-md aspect-[8.5/11] bg-white dark:bg-[#1e2128] border border-[#e0dbd3] dark:border-[#2a2e38] rounded-lg shadow-sm flex flex-col items-center justify-center gap-3 text-[#8c909a]">
+                <div className="flex-1 bg-[#faf9f7] border-r border-[#e0dbd3] flex flex-col items-center justify-center p-10 gap-6">
+                  <div className="w-full max-w-md aspect-[8.5/11] bg-white border border-[#e0dbd3] rounded-lg shadow-sm flex flex-col items-center justify-center gap-3 text-[#8c909a]">
                     <FileText size={48} strokeWidth={1} />
                     <span className="text-xs font-medium">{activeInvoice.invoiceNumber || activeInvoice.id}.pdf</span>
                     <span className="text-[10px] opacity-60">(PDF Preview available in production)</span>
                   </div>
-                  <button className="flex items-center gap-2 px-4 py-2 bg-white dark:bg-[#1e2128] border border-[#e0dbd3] dark:border-[#2a2e38] rounded-lg text-xs font-medium hover:bg-[#faf9f7] dark:hover:bg-[#161820] transition-colors">
+                  <button className="flex items-center gap-2 px-4 py-2 bg-white border border-[#e0dbd3] rounded-lg text-xs font-medium hover:bg-[#faf9f7] transition-colors">
                     <Download size={14} />
                     Download Full PDF
                   </button>
@@ -815,10 +764,10 @@ export default function App() {
                         return (
                           <div key={step.role} className="relative">
                             {i < activeInvoice.requiredApprovals.length - 1 && (
-                              <div className="absolute left-[11px] top-6 w-px h-8 bg-[#e0dbd3] dark:bg-[#2a2e38]" />
+                              <div className="absolute left-[11px] top-6 w-px h-8 bg-[#e0dbd3]" />
                             )}
                             <div className={`flex items-start gap-4 p-3 rounded-xl border transition-all ${isApproved ? 'bg-[#ecfdf5] border-[#059669]/30' : isCurrent ? 'bg-[#eaf1fb] border-[#2a5f9e]/30' : 'bg-transparent border-transparent opacity-50'}`}>
-                              <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] border-2 ${isApproved ? 'bg-[#059669] border-[#059669] text-white' : isCurrent ? 'bg-white dark:bg-[#1e2128] border-[#2a5f9e] text-[#2a5f9e]' : 'bg-transparent border-[#e0dbd3] dark:border-[#2a2e38] text-[#8c909a]'}`}>
+                              <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] border-2 ${isApproved ? 'bg-[#059669] border-[#059669] text-white' : isCurrent ? 'bg-white border-[#2a5f9e] text-[#2a5f9e]' : 'bg-transparent border-[#e0dbd3] text-[#8c909a]'}`}>
                                 {isApproved ? '✓' : i + 1}
                               </div>
                               <div>
@@ -835,7 +784,7 @@ export default function App() {
 
                 {/* Details Panel */}
                 <div className="w-96 flex flex-col overflow-y-auto">
-                  <div className="p-6 border-b border-[#e0dbd3] dark:border-[#2a2e38] space-y-4">
+                  <div className="p-6 border-b border-[#e0dbd3] space-y-4">
                     <div className="text-[10px] uppercase tracking-widest font-bold text-[#8c909a]">Invoice Details</div>
                     <div className="space-y-2">
                       <DetailRow label="Vendor" value={activeInvoice.vendor} />
@@ -851,7 +800,7 @@ export default function App() {
                   </div>
 
                   {/* Actions */}
-                  <div className="p-6 bg-[#faf9f7] dark:bg-[#161820] border-b border-[#e0dbd3] dark:border-[#2a2e38]">
+                  <div className="p-6 bg-[#faf9f7] border-b border-[#e0dbd3]">
                     <div className="text-[10px] uppercase tracking-widest font-bold text-[#8c909a] mb-4">Actions</div>
                     {canUserAct(currentUser, activeInvoice) ? (
                       <div className="grid grid-cols-2 gap-2">
@@ -877,7 +826,7 @@ export default function App() {
                             <div className="w-6 h-6 rounded-full bg-[#2a5f9e]/10 flex items-center justify-center text-[10px] font-bold text-[#2a5f9e] flex-shrink-0">
                               {USERS[c.userId]?.initials || '??'}
                             </div>
-                            <div className="flex-1 bg-[#faf9f7] dark:bg-[#161820] border border-[#e0dbd3] dark:border-[#2a2e38] rounded-tr-xl rounded-br-xl rounded-bl-xl p-2.5">
+                            <div className="flex-1 bg-[#faf9f7] border border-[#e0dbd3] rounded-tr-xl rounded-br-xl rounded-bl-xl p-2.5">
                               <div className="flex justify-between items-baseline mb-1">
                                 <span className="text-xs font-bold">{USERS[c.userId]?.name}</span>
                                 <span className="text-[9px] text-[#8c909a]">{timeAgo(c.ts)}</span>
@@ -890,7 +839,7 @@ export default function App() {
                     </div>
                     <div className="flex gap-2">
                       <textarea 
-                        className="flex-1 bg-[#faf9f7] dark:bg-[#161820] border border-[#e0dbd3] dark:border-[#2a2e38] rounded-xl p-2.5 text-xs outline-none focus:border-[#2a5f9e] resize-none"
+                        className="flex-1 bg-[#faf9f7] border border-[#e0dbd3] rounded-xl p-2.5 text-xs outline-none focus:border-[#2a5f9e] resize-none"
                         placeholder="Add a comment..."
                         rows={2}
                       />
@@ -928,7 +877,7 @@ function StatCard({ label, value, sub, color, active, onClick }: { label: string
   return (
     <button 
       onClick={onClick}
-      className={`bg-white dark:bg-[#1e2128] border rounded-xl p-4 text-left transition-all ${active ? 'border-[#2a5f9e] shadow-sm bg-[#eaf1fb] dark:bg-[#2a5f9e]/10' : 'border-[#e0dbd3] dark:border-[#2a2e38] hover:border-[#8c909a]'}`}
+      className={`bg-white border rounded-xl p-4 text-left transition-all ${active ? 'border-[#2a5f9e] shadow-sm bg-[#eaf1fb]' : 'border-[#e0dbd3] hover:border-[#8c909a]'}`}
     >
       <div className="text-[10px] text-[#8c909a] uppercase tracking-widest font-bold flex items-center gap-1.5 mb-2">
         {color && <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: color }} />}
@@ -951,11 +900,11 @@ function FilterGroup({ label, children }: { label: string, children: React.React
 
 function Badge({ status }: { status: Status }) {
   const styles: Record<Status, string> = {
-    PENDING: 'bg-[#fef9ee] text-[#d97706] dark:bg-[#f0b429]/15 dark:text-[#f0b429]',
-    APPROVED: 'bg-[#eff4ff] text-[#2563eb] dark:bg-[#5b9cf6]/15 dark:text-[#5b9cf6]',
-    DENIED: 'bg-[#fef2f2] text-[#dc2626] dark:bg-[#f87171]/15 dark:text-[#f87171]',
-    HOLD: 'bg-[#f3f0ff] text-[#7c3aed] dark:bg-[#a78bfa]/15 dark:text-[#a78bfa]',
-    PAID: 'bg-[#ecfdf5] text-[#059669] dark:bg-[#34d399]/15 dark:text-[#34d399]'
+    PENDING: 'bg-[#fef9ee] text-[#d97706]',
+    APPROVED: 'bg-[#eff4ff] text-[#2563eb]',
+    DENIED: 'bg-[#fef2f2] text-[#dc2626]',
+    HOLD: 'bg-[#f3f0ff] text-[#7c3aed]',
+    PAID: 'bg-[#ecfdf5] text-[#059669]'
   };
   
   return (
@@ -968,7 +917,7 @@ function Badge({ status }: { status: Status }) {
 
 function DetailRow({ label, value, mono }: { label: string, value: string, mono?: boolean }) {
   return (
-    <div className="flex justify-between items-baseline py-1.5 border-b border-[#ede9e3] dark:border-[#222530] last:border-0">
+    <div className="flex justify-between items-baseline py-1.5 border-b border-[#ede9e3] last:border-0">
       <span className="text-[11px] text-[#8c909a]">{label}</span>
       <span className={`text-xs font-medium text-right max-w-[60%] ${mono ? 'font-mono' : ''}`}>{value}</span>
     </div>
@@ -979,7 +928,7 @@ function ActionButton({ icon, label, color, onClick }: { icon: React.ReactNode, 
   return (
     <button 
       onClick={onClick}
-      className="flex items-center justify-center gap-2 px-3 py-2 rounded-lg border border-[#e0dbd3] dark:border-[#2a2e38] bg-white dark:bg-[#1e2128] text-xs font-medium transition-all hover:shadow-sm"
+      className="flex items-center justify-center gap-2 px-3 py-2 rounded-lg border border-[#e0dbd3] bg-white text-xs font-medium transition-all hover:shadow-sm"
       style={{ color }}
     >
       {icon}
