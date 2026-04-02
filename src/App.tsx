@@ -4,10 +4,11 @@
  */
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import * as pdfjs from 'pdfjs-dist';
+import * as pdfjsLib from 'pdfjs-dist';
+import pdfWorker from 'pdfjs-dist/build/pdf.worker.mjs?url';
 
 // Set up PDF.js worker
-pdfjs.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.js`;
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 import { 
   LayoutDashboard, 
   Upload, 
@@ -242,6 +243,21 @@ export default function App() {
     return inv.sort((a, b) => b.createdAt - a.createdAt);
   }, [invoices, currentUser, statusFilter, divisionFilter, regionFilter, storeFilter, amountFilter, searchFilter]);
 
+  const uniqueVendors = useMemo(() => {
+    const vendors = new Set<string>();
+    invoices.forEach(inv => {
+      if (inv.vendor) vendors.add(inv.vendor);
+    });
+    return Array.from(vendors).sort();
+  }, [invoices]);
+
+  const previewApprovalChain = useMemo(() => {
+    if (!uploadStoreId || !uploadAmount) return [];
+    const store = STORES.find(s => s.id === uploadStoreId);
+    if (!store) return [];
+    return buildApprovalChain(store, parseFloat(uploadAmount) || 0);
+  }, [uploadStoreId, uploadAmount]);
+
   const stats = useMemo(() => {
     const counts = { PENDING: 0, APPROVED: 0, HOLD: 0, DENIED: 0, PAID: 0 };
     let paidTotal = 0;
@@ -306,7 +322,7 @@ export default function App() {
   const generatePdfPreview = async (file: File) => {
     try {
       const arrayBuffer = await file.arrayBuffer();
-      const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
+      const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
       const page = await pdf.getPage(1);
       
       const viewport = page.getViewport({ scale: 0.5 });
@@ -325,8 +341,8 @@ export default function App() {
       }).promise;
       
       setPdfPreviewUrl(canvas.toDataURL());
-    } catch (err) {
-      console.error('Error generating PDF preview:', err);
+    } catch (err: any) {
+      console.error('Error generating PDF preview:', err.message || err);
       setPdfPreviewUrl(null);
     }
   };
@@ -337,6 +353,8 @@ export default function App() {
       setSelectedFile(file);
       generatePdfPreview(file);
     } else if (file) {
+      setSelectedFile(null);
+      setPdfPreviewUrl(null);
       alert('Please select a PDF file');
     }
   };
@@ -348,6 +366,8 @@ export default function App() {
       setSelectedFile(file);
       generatePdfPreview(file);
     } else if (file) {
+      setSelectedFile(null);
+      setPdfPreviewUrl(null);
       alert('Please drop a PDF file');
     }
   };
@@ -786,47 +806,96 @@ export default function App() {
                     </div>
 
                     <div className="grid grid-cols-2 gap-5">
-                    <div className="space-y-1.5">
-                      <label className="text-xs font-medium text-[#4a4e57]">Store *</label>
-                      <select 
-                        value={uploadStoreId}
-                        onChange={(e) => setUploadStoreId(e.target.value)}
-                        className="w-full bg-[#faf9f7] border border-[#e0dbd3] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#2a5f9e]"
-                      >
-                        <option value="">Select store...</option>
-                        {visibleStores.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-                      </select>
+                      <div className="space-y-1.5">
+                        <label className="text-xs font-medium text-[#4a4e57]">Store *</label>
+                        <select 
+                          value={uploadStoreId}
+                          onChange={(e) => setUploadStoreId(e.target.value)}
+                          className="w-full bg-[#faf9f7] border border-[#e0dbd3] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#2a5f9e]"
+                        >
+                          <option value="">Select store...</option>
+                          {visibleStores.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                        </select>
+                      </div>
+                      <div className="space-y-1.5">
+                        <label className="text-xs font-medium text-[#4a4e57]">Vendor Name *</label>
+                        <input 
+                          type="text" 
+                          list="vendor-list"
+                          value={uploadVendor}
+                          onChange={(e) => setUploadVendor(e.target.value)}
+                          placeholder="e.g. Sysco Foods" 
+                          className="w-full bg-[#faf9f7] border border-[#e0dbd3] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#2a5f9e]" 
+                        />
+                        <datalist id="vendor-list">
+                          {uniqueVendors.map(v => <option key={v} value={v} />)}
+                        </datalist>
+                      </div>
+                      <div className="space-y-1.5">
+                        <label className="text-xs font-medium text-[#4a4e57]">Invoice Date *</label>
+                        <input 
+                          type="date" 
+                          value={uploadDate}
+                          onChange={(e) => setUploadDate(e.target.value)}
+                          className="w-full bg-[#faf9f7] border border-[#e0dbd3] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#2a5f9e]" 
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <label className="text-xs font-medium text-[#4a4e57]">Amount ($) *</label>
+                        <input 
+                          type="number" 
+                          value={uploadAmount}
+                          onChange={(e) => setUploadAmount(e.target.value)}
+                          placeholder="0.00" 
+                          className="w-full bg-[#faf9f7] border border-[#e0dbd3] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#2a5f9e]" 
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <label className="text-xs font-medium text-[#4a4e57]">Invoice #</label>
+                        <input 
+                          type="text" 
+                          value={uploadInvNum}
+                          onChange={(e) => setUploadInvNum(e.target.value)}
+                          placeholder="INV-12345" 
+                          className="w-full bg-[#faf9f7] border border-[#e0dbd3] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#2a5f9e]" 
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <label className="text-xs font-medium text-[#4a4e57]">PO #</label>
+                        <input 
+                          type="text" 
+                          value={uploadPoNum}
+                          onChange={(e) => setUploadPoNum(e.target.value)}
+                          placeholder="PO-67890" 
+                          className="w-full bg-[#faf9f7] border border-[#e0dbd3] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#2a5f9e]" 
+                        />
+                      </div>
                     </div>
-                    <div className="space-y-1.5">
-                      <label className="text-xs font-medium text-[#4a4e57]">Vendor Name *</label>
-                      <input 
-                        type="text" 
-                        value={uploadVendor}
-                        onChange={(e) => setUploadVendor(e.target.value)}
-                        placeholder="e.g. Sysco Foods" 
-                        className="w-full bg-[#faf9f7] border border-[#e0dbd3] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#2a5f9e]" 
-                      />
-                    </div>
-                    <div className="space-y-1.5">
-                      <label className="text-xs font-medium text-[#4a4e57]">Invoice Date *</label>
-                      <input 
-                        type="date" 
-                        value={uploadDate}
-                        onChange={(e) => setUploadDate(e.target.value)}
-                        className="w-full bg-[#faf9f7] border border-[#e0dbd3] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#2a5f9e]" 
-                      />
-                    </div>
-                    <div className="space-y-1.5">
-                      <label className="text-xs font-medium text-[#4a4e57]">Amount ($) *</label>
-                      <input 
-                        type="number" 
-                        value={uploadAmount}
-                        onChange={(e) => setUploadAmount(e.target.value)}
-                        placeholder="0.00" 
-                        className="w-full bg-[#faf9f7] border border-[#e0dbd3] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#2a5f9e]" 
-                      />
-                    </div>
-                  </div>
+
+                    {previewApprovalChain.length > 0 && (
+                      <div className="mt-8 pt-8 border-t border-[#e0dbd3]">
+                        <label className="block text-xs font-medium text-[#4a4e57] mb-4 uppercase tracking-wider">Approval Chain</label>
+                        <div className="flex items-center gap-2 overflow-x-auto pb-2">
+                          {previewApprovalChain.map((step, idx) => (
+                            <React.Fragment key={idx}>
+                              <div className="flex flex-col items-center min-w-[100px]">
+                                <div className="w-8 h-8 rounded-full bg-[#eaf1fb] border border-[#2a5f9e] flex items-center justify-center text-[#2a5f9e] text-xs font-bold mb-1">
+                                  {idx + 1}
+                                </div>
+                                <span className="text-[10px] font-semibold text-[#1a1c21] whitespace-nowrap">{step.label}</span>
+                                <span className="text-[9px] text-[#8c909a] whitespace-nowrap">{step.name}</span>
+                              </div>
+                              {idx < previewApprovalChain.length - 1 && (
+                                <ChevronRight size={14} className="text-[#e0dbd3] mt-[-16px]" />
+                              )}
+                            </React.Fragment>
+                          ))}
+                        </div>
+                        <p className="text-[10px] text-[#8c909a] mt-3 italic">
+                          * Chain automatically updates based on store and amount thresholds ($500, $1,000, $5,000).
+                        </p>
+                      </div>
+                    )}
 
                   <div className="flex justify-end gap-3 mt-10">
                     <button onClick={() => setPage('dashboard')} className="px-4 py-2 text-sm font-medium text-[#4a4e57] hover:bg-black/5 rounded-lg transition-colors">Cancel</button>
