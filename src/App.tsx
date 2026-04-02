@@ -27,6 +27,7 @@ import {
   ArrowLeft,
   Send,
   Download,
+  Copy,
   User as UserIcon
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
@@ -152,6 +153,7 @@ export default function App() {
   const [amountFilter, setAmountFilter] = useState<string>('');
   const [selectedAction, setSelectedAction] = useState<'APPROVED' | 'DENIED' | 'HOLD' | null>(null);
   const [isReminderModalOpen, setIsReminderModalOpen] = useState(false);
+  const [reminderUserId, setReminderUserId] = useState<string>('');
   const [isChangePasswordModalOpen, setIsChangePasswordModalOpen] = useState(false);
   const [newPassword, setNewPassword] = useState('');
   const [isSupabaseConfigured, setIsSupabaseConfigured] = useState(false);
@@ -1318,33 +1320,58 @@ export default function App() {
               onClick={e => e.stopPropagation()}
             >
               <div className="flex items-center justify-between mb-6">
-                <h3 className="text-lg font-bold">Email Reminder Template</h3>
+                <h3 className="text-lg font-bold">Send Reminder</h3>
                 <button onClick={() => setIsReminderModalOpen(false)}><XCircle size={20} className="text-[#8c909a]" /></button>
               </div>
-              
-              <div className="bg-[#faf9f7] border border-[#e0dbd3] rounded-xl p-4 font-mono text-xs whitespace-pre-wrap mb-6">
-{`Subject: Weekly Invoice Approval Reminder
 
-Hello Team,
+              <div className="space-y-4 mb-6">
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-bold text-[#8c909a] uppercase tracking-wider">Select Person</label>
+                  <select 
+                    value={reminderUserId}
+                    onChange={(e) => setReminderUserId(e.target.value)}
+                    className="w-full bg-[#faf9f7] border border-[#e0dbd3] rounded-xl px-4 py-3 text-sm outline-none focus:border-[#2a5f9e] transition-all"
+                  >
+                    <option value="">Choose a person...</option>
+                    {Object.values(USERS).map(u => (
+                      <option key={u.id} value={u.id}>{u.name} ({u.role.replace(/_/g, ' ')})</option>
+                    ))}
+                  </select>
+                </div>
 
-This is a friendly reminder that you have pending invoices awaiting your approval in the Invoice Tracker.
+                {reminderUserId && (
+                  <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="space-y-4">
+                    {(() => {
+                      const targetUser = USERS[reminderUserId];
+                      const pendingCount = invoices.filter(inv => canUserAct(targetUser, inv)).length;
+                      const subject = `Action Required: ${pendingCount} Pending Invoice${pendingCount === 1 ? '' : 's'} for Approval`;
+                      const body = `Hello ${targetUser.firstName},\n\nThis is a friendly reminder that you have ${pendingCount} pending invoice${pendingCount === 1 ? '' : 's'} awaiting your approval in the Invoice Tracker.\n\nPlease log in to review and take action:\nhttps://dossaniparadise.github.io/invoice-tracker/\n\nThank you,\nAccounting Team`;
+                      
+                      return (
+                        <>
+                          <div className="bg-[#faf9f7] border border-[#e0dbd3] rounded-xl p-4 font-mono text-[11px] whitespace-pre-wrap">
+                            <div className="text-[#8c909a] mb-2 font-sans font-bold uppercase tracking-widest text-[9px]">Subject</div>
+                            <div className="mb-4 text-[#1a1c21]">{subject}</div>
+                            <div className="text-[#8c909a] mb-2 font-sans font-bold uppercase tracking-widest text-[9px]">Body</div>
+                            <div className="text-[#1a1c21]">{body}</div>
+                          </div>
 
-Please log in to review and take action:
-https://dossaniparadise.github.io/invoice-tracker/
-
-Thank you,
-Accounting Team`}
+                          <button 
+                            onClick={() => {
+                              navigator.clipboard.writeText(`Subject: ${subject}\n\n${body}`);
+                              alert('Reminder template copied to clipboard!');
+                            }}
+                            className="w-full bg-[#2a5f9e] text-white py-3 rounded-xl font-bold hover:bg-[#1d4a7d] transition-all flex items-center justify-center gap-2"
+                          >
+                            <Copy size={16} />
+                            <span>Copy Full Email</span>
+                          </button>
+                        </>
+                      );
+                    })()}
+                  </motion.div>
+                )}
               </div>
-
-              <button 
-                onClick={() => {
-                  navigator.clipboard.writeText(`Subject: Weekly Invoice Approval Reminder\n\nHello Team,\n\nThis is a friendly reminder that you have pending invoices awaiting your approval in the Invoice Tracker.\n\nPlease log in to review and take action:\nhttps://dossaniparadise.github.io/invoice-tracker/\n\nThank you,\nAccounting Team`);
-                  alert('Template copied to clipboard!');
-                }}
-                className="w-full bg-[#2a5f9e] text-white py-3 rounded-xl font-bold hover:bg-[#1d4a7d] transition-all"
-              >
-                Copy to Clipboard
-              </button>
             </motion.div>
           </motion.div>
         )}
