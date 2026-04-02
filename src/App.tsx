@@ -325,7 +325,7 @@ export default function App() {
       const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
       const page = await pdf.getPage(1);
       
-      const viewport = page.getViewport({ scale: 0.5 });
+      const viewport = page.getViewport({ scale: 2.0 });
       const canvas = document.createElement('canvas');
       const context = canvas.getContext('2d');
       
@@ -573,6 +573,49 @@ export default function App() {
           )}
           <div className="flex-1" />
           
+          {currentUser && (currentUser.role === 'AP_SUPERVISOR' || currentUser.role === 'AP_COORDINATOR') && (
+            <button 
+              onClick={async () => {
+                if (!confirm('This will send a reminder email to all users with pending invoices. Continue?')) return;
+                try {
+                  const res = await fetch('/api/trigger-reminders', { method: 'POST' });
+                  if (res.ok) alert('Reminders sent successfully!');
+                  else alert('Failed to send reminders. Check if RESEND_API_KEY is configured.');
+                } catch (err) {
+                  console.error(err);
+                  alert('Error sending reminders.');
+                }
+              }}
+              className="bg-[#059669] hover:bg-[#047857] text-white text-[10px] font-medium px-3 py-1.5 rounded-md transition-colors flex items-center gap-1.5"
+            >
+              <Send size={12} />
+              <span>Send Reminders</span>
+            </button>
+          )}
+
+          {currentUser && currentUser.id === 'it' && (
+            <button 
+              onClick={async () => {
+                try {
+                  const res = await fetch('/api/test-email', { 
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ email: currentUser.email, name: currentUser.name })
+                  });
+                  if (res.ok) alert('Test email sent to ' + currentUser.email);
+                  else alert('Failed to send test email.');
+                } catch (err) {
+                  console.error(err);
+                  alert('Error sending test email.');
+                }
+              }}
+              className="bg-[#7c3aed] hover:bg-[#6d28d9] text-white text-[10px] font-medium px-3 py-1.5 rounded-md transition-colors flex items-center gap-1.5"
+            >
+              <Bell size={12} />
+              <span>Send Test Email</span>
+            </button>
+          )}
+
           <button 
             onClick={() => setPage('upload')}
             className="bg-[#2a5f9e] hover:bg-[#1d4a7d] text-white text-xs font-medium px-3 py-1.5 rounded-md transition-colors"
