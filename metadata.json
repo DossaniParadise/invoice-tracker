@@ -1,0 +1,5 @@
+{
+  "name": "AP Invoice Tracker",
+  "description": "A comprehensive accounts payable invoice tracking system for Dossani Paradise with multi-stage approval workflows.",
+  "requestFramePermissions": []
+}
