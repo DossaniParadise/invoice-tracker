@@ -115,6 +115,12 @@ const canUserAct = (user: User, invoice: Invoice): boolean => {
   );
 };
 
+const canUserMarkAsPaid = (user: User, invoice: Invoice): boolean => {
+  if (invoice.status !== 'APPROVED') return false;
+  const allowedRoles: Role[] = ['AP_COORDINATOR', 'AP_SUPERVISOR', 'ACCOUNTING', 'FINANCE_MANAGER'];
+  return allowedRoles.includes(user.role) || user.id === 'it';
+};
+
 const getStoreLogo = (storeName: string) => {
   const n = storeName.toLowerCase();
   if (n.includes('burger king')) return 'https://raw.githubusercontent.com/DossaniParadise/invoice-tracker/main/logos/bk-logo.png';
@@ -143,12 +149,16 @@ export default function App() {
   const [newComment, setNewComment] = useState('');
   const [isAddingComment, setIsAddingComment] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const multiFileInputRef = useRef<HTMLInputElement>(null);
   
-  // Filters
+  // Multi-upload state
+  const [pendingUploads, setPendingUploads] = useState<any[]>([]);
+  const [isMultiUploadMode, setIsMultiUploadMode] = useState(false);
   const [statusFilter, setStatusFilter] = useState<string>('');
   const [divisionFilter, setDivisionFilter] = useState<string>('');
   const [regionFilter, setRegionFilter] = useState<string>('');
   const [storeFilter, setStoreFilter] = useState<string>('');
+  const [approverFilter, setApproverFilter] = useState<string>('');
   const [searchFilter, setSearchFilter] = useState<string>('');
   const [amountFilter, setAmountFilter] = useState<string>('');
   const [selectedAction, setSelectedAction] = useState<'APPROVED' | 'DENIED' | 'HOLD' | null>(null);
@@ -230,6 +240,12 @@ export default function App() {
     if (divisionFilter) inv = inv.filter(i => i.division === divisionFilter);
     if (regionFilter) inv = inv.filter(i => i.region === regionFilter);
     if (storeFilter) inv = inv.filter(i => i.storeId === storeFilter);
+    if (approverFilter) {
+      inv = inv.filter(i => {
+        const currentStep = i.requiredApprovals.find(s => s.role === i.currentStage);
+        return currentStep?.userId === approverFilter;
+      });
+    }
     if (amountFilter) {
       if (amountFilter === '5000+') inv = inv.filter(i => i.amount >= 5000);
       else {
@@ -247,7 +263,7 @@ export default function App() {
     }
     
     return inv.sort((a, b) => b.createdAt - a.createdAt);
-  }, [invoices, currentUser, statusFilter, divisionFilter, regionFilter, storeFilter, amountFilter, searchFilter]);
+  }, [invoices, currentUser, statusFilter, divisionFilter, regionFilter, storeFilter, approverFilter, amountFilter, searchFilter]);
 
   const uniqueVendors = useMemo(() => {
     const vendors = new Set<string>();
@@ -283,11 +299,12 @@ export default function App() {
     return { counts, paidTotal, total: baseInvoices.length };
   }, [invoices, currentUser]);
 
-  const handleAction = async (type: 'APPROVED' | 'DENIED' | 'HOLD' | 'PUSH_BACK' | 'PAID', comment: string) => {
-    if (!activeInvoice || !currentUser) return;
+  const handleAction = async (type: 'APPROVED' | 'DENIED' | 'HOLD' | 'PUSH_BACK' | 'PAID', comment: string, invoiceToUpdate?: Invoice) => {
+    const targetInvoice = invoiceToUpdate || activeInvoice;
+    if (!targetInvoice || !currentUser) return;
     
     const now = Date.now();
-    const updatedInvoice = { ...activeInvoice };
+    const updatedInvoice = { ...targetInvoice };
     
     if (type === 'PAID') {
       updatedInvoice.status = 'PAID';
@@ -331,7 +348,9 @@ export default function App() {
       setInvoices(prev => prev.map(i => i.id === updatedInvoice.id ? updatedInvoice : i));
     }
     
-    setActiveInvoice(updatedInvoice);
+    if (activeInvoice && activeInvoice.id === updatedInvoice.id) {
+      setActiveInvoice(updatedInvoice);
+    }
     setSelectedAction(null);
     setNewComment('');
   };
@@ -433,27 +452,142 @@ export default function App() {
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file && file.type === 'application/pdf') {
-      setSelectedFile(file);
-      generatePdfPreview(file);
-    } else if (file) {
-      setSelectedFile(null);
-      setPdfPreviewUrl(null);
-      alert('Please select a PDF file');
+    const files = e.target.files;
+    if (!files) return;
+
+    if (files.length > 1 || isMultiUploadMode) {
+      handleMultipleFiles(Array.from(files) as File[]);
+    } else {
+      const file = files[0];
+      if (file && file.type === 'application/pdf') {
+        setSelectedFile(file);
+        generatePdfPreview(file);
+      } else if (file) {
+        alert('Please select a PDF file');
+      }
     }
+  };
+
+  const handleMultipleFiles = async (files: File[]) => {
+    const pdfFiles = files.filter(f => f.type === 'application/pdf');
+    if (pdfFiles.length === 0) {
+      alert('No PDF files found');
+      return;
+    }
+
+    setIsMultiUploadMode(true);
+    const newPending = await Promise.all(pdfFiles.map(async (file) => {
+      // Generate a quick preview for each if possible, or just use a placeholder
+      return {
+        id: Math.random().toString(36).substr(2, 9),
+        file,
+        vendor: '',
+        amount: '',
+        date: new Date().toISOString().slice(0, 10),
+        invoiceNumber: '',
+        poNumber: '',
+        storeId: '',
+        status: 'idle' as 'idle' | 'uploading' | 'success' | 'error',
+        error: ''
+      };
+    }));
+
+    setPendingUploads(prev => [...prev, ...newPending]);
+    setPage('upload');
   };
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
-    const file = e.dataTransfer.files?.[0];
-    if (file && file.type === 'application/pdf') {
-      setSelectedFile(file);
-      generatePdfPreview(file);
-    } else if (file) {
-      setSelectedFile(null);
-      setPdfPreviewUrl(null);
-      alert('Please drop a PDF file');
+    const files = Array.from(e.dataTransfer.files) as File[];
+    if (files.length > 1 || isMultiUploadMode) {
+      handleMultipleFiles(files);
+    } else {
+      const file = files[0];
+      if (file && file.type === 'application/pdf') {
+        setSelectedFile(file);
+        generatePdfPreview(file);
+      } else if (file) {
+        alert('Please drop a PDF file');
+      }
+    }
+  };
+
+  const handleUpdatePendingUpload = (id: string, updates: any) => {
+    setPendingUploads(prev => prev.map(u => u.id === id ? { ...u, ...updates } : u));
+  };
+
+  const handleRemovePendingUpload = (id: string) => {
+    setPendingUploads(prev => {
+      const filtered = prev.filter(u => u.id !== id);
+      if (filtered.length === 0) setIsMultiUploadMode(false);
+      return filtered;
+    });
+  };
+
+  const handleBulkUpload = async () => {
+    const validUploads = pendingUploads.filter(u => u.status !== 'success');
+    if (validUploads.length === 0) return;
+
+    // Check if all required fields are filled for each
+    const incomplete = validUploads.some(u => !u.storeId || !u.vendor || !u.amount || !u.date);
+    if (incomplete) {
+      alert('Please fill all required fields (Store, Vendor, Date, Amount) for all invoices');
+      return;
+    }
+
+    for (const upload of validUploads) {
+      handleUpdatePendingUpload(upload.id, { status: 'uploading' });
+      
+      try {
+        const store = STORES.find(s => s.id === upload.storeId)!;
+        const amount = parseFloat(upload.amount);
+        const chain = buildApprovalChain(store, amount);
+        
+        const newInvoice: Omit<Invoice, 'id'> = {
+          vendor: upload.vendor,
+          amount,
+          date: upload.date,
+          invoiceNumber: upload.invoiceNumber,
+          poNumber: upload.poNumber,
+          storeId: upload.storeId,
+          storeName: store.name,
+          division: store.division,
+          region: store.region,
+          acId: store.acId,
+          directorId: store.directorId,
+          status: 'PENDING',
+          currentStage: chain[0].role,
+          requiredApprovals: chain,
+          approvalCycles: [{ cycle: 1, steps: [] }],
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          createdBy: currentUserId!,
+          paidAt: null,
+          archived: false,
+          comments: []
+        };
+
+        if (isSupabaseConfigured) {
+          const createdInvoice = await invoiceService.createInvoice(newInvoice as any);
+          try {
+            const fileUrl = await invoiceService.uploadInvoiceFile(upload.file, createdInvoice.id);
+            await invoiceService.updateInvoice(createdInvoice.id, { fileUrl });
+            handleUpdatePendingUpload(upload.id, { status: 'success' });
+          } catch (err: any) {
+            console.error('PDF Upload failed for bulk:', err);
+            handleUpdatePendingUpload(upload.id, { status: 'error', error: 'PDF Upload failed' });
+          }
+        } else {
+          // Local mode
+          const id = `INV-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+          const invoiceWithId = { ...newInvoice, id } as Invoice;
+          setInvoices(prev => [invoiceWithId, ...prev]);
+          handleUpdatePendingUpload(upload.id, { status: 'success' });
+        }
+      } catch (err: any) {
+        console.error('Bulk upload failed:', err);
+        handleUpdatePendingUpload(upload.id, { status: 'error', error: err.message || 'Failed to save invoice' });
+      }
     }
   };
 
@@ -729,9 +863,18 @@ export default function App() {
                   </FilterGroup>
                   <div className="w-px h-4 bg-[#e0dbd3]" />
                   <FilterGroup label="Store">
-                    <select value={storeFilter} onChange={(e) => setStoreFilter(e.target.value)} className="bg-[#faf9f7] border border-[#e0dbd3] rounded-md px-2 py-1 text-xs outline-none">
+                    <select value={storeFilter} onChange={(e) => setStoreFilter(e.target.value)} className="bg-[#faf9f7] border border-[#e0dbd3] rounded-md px-2 py-1 text-xs outline-none max-w-[120px]">
                       <option value="">All Stores</option>
-                      {visibleStores.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                      {STORES.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                    </select>
+                  </FilterGroup>
+                  <div className="w-px h-4 bg-[#e0dbd3]" />
+                  <FilterGroup label="Approver">
+                    <select value={approverFilter} onChange={(e) => setApproverFilter(e.target.value)} className="bg-[#faf9f7] border border-[#e0dbd3] rounded-md px-2 py-1 text-xs outline-none max-w-[120px]">
+                      <option value="">All</option>
+                      {Object.values(USERS).filter(u => ['AREA_COACH', 'DIRECTOR', 'VP', 'COO', 'AP_SUPERVISOR', 'AP_COORDINATOR'].includes(u.role)).map(u => (
+                        <option key={u.id} value={u.id}>{u.name}</option>
+                      ))}
                     </select>
                   </FilterGroup>
                   <div className="flex-1" />
@@ -813,7 +956,20 @@ export default function App() {
                               </div>
                             </td>
                             <td className="px-4 py-3 text-right">
-                              <ChevronRight size={16} className="text-[#8c909a] group-hover:text-[#2a5f9e] transition-colors" />
+                              <div className="flex items-center justify-end gap-2">
+                                {canUserMarkAsPaid(currentUser, inv) && (
+                                  <button 
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleAction('PAID', 'Marked as paid from dashboard', inv);
+                                    }}
+                                    className="bg-[#059669] hover:bg-[#047857] text-white text-[10px] font-bold px-2 py-1 rounded transition-colors"
+                                  >
+                                    Mark Paid
+                                  </button>
+                                )}
+                                <ChevronRight size={16} className="text-[#8c909a] group-hover:text-[#2a5f9e] transition-colors" />
+                              </div>
                             </td>
                           </tr>
                         ))
@@ -823,25 +979,51 @@ export default function App() {
                 </div>
               </motion.div>
             )}
-
             {page === 'upload' && (
               <motion.div 
                 key="upload"
-                initial={{ opacity: 0, x: 20 }}
-                animate={{ opacity: 1, x: 0 }}
-                exit={{ opacity: 0, x: -20 }}
-                className={`mx-auto transition-all duration-300 ${pdfPreviewUrl ? 'max-w-6xl' : 'max-w-3xl'}`}
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -10 }}
+                className="max-w-6xl mx-auto"
               >
-                <div className="flex items-center gap-4 mb-6">
-                  <button onClick={() => setPage('dashboard')} className="p-2 hover:bg-black/5 rounded-lg transition-colors">
-                    <ArrowLeft size={18} />
-                  </button>
-                  <h1 className="text-xl font-semibold tracking-tight">Upload Invoice</h1>
+                <div className="flex items-center justify-between mb-8">
+                  <div className="flex items-center gap-4">
+                    <button onClick={() => setPage('dashboard')} className="p-2 hover:bg-black/5 rounded-lg transition-colors">
+                      <ArrowLeft size={18} />
+                    </button>
+                    <div>
+                      <h2 className="text-2xl font-bold tracking-tight">Upload Invoices</h2>
+                      <p className="text-sm text-[#8c909a] mt-1">Drag and drop multiple PDFs to upload in bulk.</p>
+                    </div>
+                  </div>
+                  {isMultiUploadMode && (
+                    <div className="flex items-center gap-3">
+                      <button 
+                        onClick={() => {
+                          setPendingUploads([]);
+                          setIsMultiUploadMode(false);
+                          setSelectedFile(null);
+                          setPdfPreviewUrl(null);
+                        }}
+                        className="px-4 py-2 text-xs font-bold text-[#dc2626] hover:bg-[#fef2f2] rounded-lg transition-colors"
+                      >
+                        Cancel All
+                      </button>
+                      <button 
+                        onClick={handleBulkUpload}
+                        className="bg-[#2a5f9e] hover:bg-[#1d4a7d] text-white px-6 py-2 rounded-lg text-sm font-bold shadow-lg shadow-[#2a5f9e]/20 transition-all flex items-center gap-2"
+                      >
+                        <Upload size={16} />
+                        <span>Upload All Invoices</span>
+                      </button>
+                    </div>
+                  )}
                 </div>
 
-                <div className={`grid gap-8 ${pdfPreviewUrl ? 'grid-cols-1 lg:grid-cols-2' : 'grid-cols-1'}`}>
-                  {/* Left Side: PDF Preview (if available) */}
-                  {pdfPreviewUrl && (
+                <div className={`grid gap-8 ${pdfPreviewUrl && !isMultiUploadMode ? 'grid-cols-1 lg:grid-cols-2' : 'grid-cols-1'}`}>
+                  {/* Left Side: PDF Preview (if available and not in multi-mode) */}
+                  {pdfPreviewUrl && !isMultiUploadMode && (
                     <div className="bg-white border border-[#e0dbd3] rounded-xl p-4 shadow-sm h-fit sticky top-6">
                       <div className="flex items-center justify-between mb-4">
                         <h2 className="text-xs font-medium text-[#4a4e57] uppercase tracking-wider">Invoice Preview</h2>
@@ -861,170 +1043,218 @@ export default function App() {
                     </div>
                   )}
 
-                  {/* Right Side: Form */}
-                  <div className="bg-white border border-[#e0dbd3] rounded-xl p-8 shadow-sm h-fit">
-                    <div className="mb-8">
-                      <label className="block text-xs font-medium text-[#4a4e57] mb-2 uppercase tracking-wider">PDF Document *</label>
-                      <input 
-                        type="file" 
-                        ref={fileInputRef}
-                        onChange={handleFileChange}
-                        accept="application/pdf"
-                        className="hidden"
-                      />
-                      {!pdfPreviewUrl ? (
-                        <div 
-                          onClick={() => fileInputRef.current?.click()}
-                          onDragOver={(e) => e.preventDefault()}
-                          onDrop={handleDrop}
-                          className={`border-2 border-dashed rounded-xl p-10 text-center cursor-pointer transition-all group ${
-                            selectedFile ? 'border-[#059669] bg-[#ecfdf5]' : 'border-[#e0dbd3] hover:border-[#2a5f9e] hover:bg-[#eaf1fb]'
-                          }`}
-                        >
-                          <div className="text-4xl mb-3 group-hover:scale-110 transition-transform">
-                            {selectedFile ? '✅' : '📄'}
+                  {/* Form or List */}
+                  {!isMultiUploadMode ? (
+                    <div className="bg-white border border-[#e0dbd3] rounded-xl p-8 shadow-sm h-fit">
+                      <div className="mb-8">
+                        <label className="block text-xs font-medium text-[#4a4e57] mb-2 uppercase tracking-wider">PDF Document *</label>
+                        <input 
+                          type="file" 
+                          ref={fileInputRef}
+                          onChange={handleFileChange}
+                          accept="application/pdf"
+                          className="hidden"
+                        />
+                        {!pdfPreviewUrl ? (
+                          <div 
+                            onClick={() => fileInputRef.current?.click()}
+                            onDragOver={(e) => e.preventDefault()}
+                            onDrop={handleDrop}
+                            className={`border-2 border-dashed rounded-xl p-10 text-center cursor-pointer transition-all group ${
+                              selectedFile ? 'border-[#059669] bg-[#ecfdf5]' : 'border-[#e0dbd3] hover:border-[#2a5f9e] hover:bg-[#eaf1fb]'
+                            }`}
+                          >
+                            <div className="text-4xl mb-3 group-hover:scale-110 transition-transform">
+                              {selectedFile ? '✅' : '📄'}
+                            </div>
+                            <p className="text-sm font-medium">
+                              {selectedFile ? selectedFile.name : 'Click to upload or drag & drop'}
+                            </p>
+                            <p className="text-[11px] text-[#8c909a] mt-1">
+                              {selectedFile ? `${(selectedFile.size / 1024 / 1024).toFixed(2)} MB` : 'PDF only · max 25 MB'}
+                            </p>
                           </div>
-                          <p className="text-sm font-medium">
-                            {selectedFile ? selectedFile.name : 'Click to upload or drag & drop'}
-                          </p>
-                          <p className="text-[11px] text-[#8c909a] mt-1">
-                            {selectedFile ? `${(selectedFile.size / 1024 / 1024).toFixed(2)} MB` : 'PDF only · max 25 MB'}
-                          </p>
-                          {selectedFile && (
+                        ) : (
+                          <div className="flex items-center gap-3 p-3 bg-[#ecfdf5] border border-[#059669] rounded-lg">
+                            <div className="text-xl">✅</div>
+                            <div className="flex-1 min-w-0">
+                              <p className="text-xs font-medium truncate">{selectedFile?.name}</p>
+                              <p className="text-[10px] text-[#059669]">File ready for upload</p>
+                            </div>
                             <button 
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setSelectedFile(null);
-                                setPdfPreviewUrl(null);
-                              }}
-                              className="mt-3 text-[10px] text-[#dc2626] hover:underline"
+                              onClick={() => fileInputRef.current?.click()}
+                              className="text-[10px] text-[#2a5f9e] hover:underline font-medium"
                             >
-                              Remove file
+                              Change
                             </button>
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-5">
+                        <div className="space-y-1.5">
+                          <label className="text-xs font-medium text-[#4a4e57]">Store *</label>
+                          <select 
+                            value={uploadStoreId}
+                            onChange={(e) => setUploadStoreId(e.target.value)}
+                            className="w-full bg-[#faf9f7] border border-[#e0dbd3] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#2a5f9e]"
+                          >
+                            <option value="">Select store...</option>
+                            {visibleStores.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                          </select>
+                        </div>
+                        <div className="space-y-1.5">
+                          <label className="text-xs font-medium text-[#4a4e57]">Vendor Name *</label>
+                          <input 
+                            type="text" 
+                            list="vendor-list"
+                            value={uploadVendor}
+                            onChange={(e) => setUploadVendor(e.target.value)}
+                            placeholder="e.g. Sysco Foods" 
+                            className="w-full bg-[#faf9f7] border border-[#e0dbd3] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#2a5f9e]" 
+                          />
+                        </div>
+                        <div className="space-y-1.5">
+                          <label className="text-xs font-medium text-[#4a4e57]">Invoice Date *</label>
+                          <input 
+                            type="date" 
+                            value={uploadDate}
+                            onChange={(e) => setUploadDate(e.target.value)}
+                            className="w-full bg-[#faf9f7] border border-[#e0dbd3] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#2a5f9e]" 
+                          />
+                        </div>
+                        <div className="space-y-1.5">
+                          <label className="text-xs font-medium text-[#4a4e57]">Amount ($) *</label>
+                          <input 
+                            type="number" 
+                            value={uploadAmount}
+                            onChange={(e) => setUploadAmount(e.target.value)}
+                            placeholder="0.00" 
+                            className="w-full bg-[#faf9f7] border border-[#e0dbd3] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#2a5f9e]" 
+                          />
+                        </div>
+                        <div className="space-y-1.5">
+                          <label className="text-xs font-medium text-[#4a4e57]">Invoice #</label>
+                          <input 
+                            type="text" 
+                            value={uploadInvNum}
+                            onChange={(e) => setUploadInvNum(e.target.value)}
+                            placeholder="INV-12345" 
+                            className="w-full bg-[#faf9f7] border border-[#e0dbd3] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#2a5f9e]" 
+                          />
+                        </div>
+                        <div className="space-y-1.5">
+                          <label className="text-xs font-medium text-[#4a4e57]">PO #</label>
+                          <input 
+                            type="text" 
+                            value={uploadPoNum}
+                            onChange={(e) => setUploadPoNum(e.target.value)}
+                            placeholder="PO-67890" 
+                            className="w-full bg-[#faf9f7] border border-[#e0dbd3] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#2a5f9e]" 
+                          />
+                        </div>
+                      </div>
+
+                      <button 
+                        onClick={handleSubmitInvoice}
+                        disabled={!selectedFile || !uploadStoreId || !uploadVendor || !uploadAmount || !uploadDate}
+                        className="w-full bg-[#2a5f9e] hover:bg-[#1d4a7d] disabled:opacity-50 disabled:cursor-not-allowed text-white py-4 rounded-xl mt-8 font-bold shadow-lg shadow-[#2a5f9e]/20 transition-all flex items-center justify-center gap-2"
+                      >
+                        <Upload size={18} />
+                        <span>Submit Invoice for Approval</span>
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="space-y-4">
+                      {pendingUploads.map((upload) => (
+                        <div key={upload.id} className={`bg-white border rounded-xl p-4 shadow-sm transition-all ${upload.status === 'error' ? 'border-[#dc2626]/30 bg-[#fef2f2]/30' : upload.status === 'success' ? 'border-[#059669]/30 bg-[#ecfdf5]/30' : 'border-[#e0dbd3]'}`}>
+                          <div className="flex items-center gap-4 mb-4">
+                            <div className="w-10 h-10 rounded-lg bg-[#faf9f7] flex items-center justify-center text-xl border border-[#e0dbd3]">
+                              {upload.status === 'success' ? '✅' : upload.status === 'error' ? '❌' : '📄'}
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <div className="text-sm font-bold truncate">{upload.file.name}</div>
+                              <div className="text-[10px] text-[#8c909a]">{(upload.file.size / 1024 / 1024).toFixed(2)} MB</div>
+                            </div>
+                            {upload.status === 'error' && <div className="text-[10px] font-bold text-[#dc2626] uppercase">{upload.error}</div>}
+                            {upload.status === 'idle' && (
+                              <button 
+                                onClick={() => handleRemovePendingUpload(upload.id)}
+                                className="text-[#8c909a] hover:text-[#dc2626] transition-colors"
+                              >
+                                <XCircle size={18} />
+                              </button>
+                            )}
+                          </div>
+
+                          {upload.status !== 'success' && (
+                            <div className="grid grid-cols-6 gap-3">
+                              <div className="space-y-1">
+                                <label className="text-[9px] font-bold text-[#8c909a] uppercase">Store *</label>
+                                <select 
+                                  value={upload.storeId}
+                                  onChange={(e) => handleUpdatePendingUpload(upload.id, { storeId: e.target.value })}
+                                  className="w-full bg-[#faf9f7] border border-[#e0dbd3] rounded-lg px-2 py-1.5 text-xs outline-none focus:border-[#2a5f9e]"
+                                >
+                                  <option value="">Select...</option>
+                                  {visibleStores.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                                </select>
+                              </div>
+                              <div className="space-y-1">
+                                <label className="text-[9px] font-bold text-[#8c909a] uppercase">Vendor *</label>
+                                <input 
+                                  type="text"
+                                  list="vendor-list"
+                                  value={upload.vendor}
+                                  onChange={(e) => handleUpdatePendingUpload(upload.id, { vendor: e.target.value })}
+                                  className="w-full bg-[#faf9f7] border border-[#e0dbd3] rounded-lg px-2 py-1.5 text-xs outline-none focus:border-[#2a5f9e]"
+                                />
+                              </div>
+                              <div className="space-y-1">
+                                <label className="text-[9px] font-bold text-[#8c909a] uppercase">Date *</label>
+                                <input 
+                                  type="date"
+                                  value={upload.date}
+                                  onChange={(e) => handleUpdatePendingUpload(upload.id, { date: e.target.value })}
+                                  className="w-full bg-[#faf9f7] border border-[#e0dbd3] rounded-lg px-2 py-1.5 text-xs outline-none focus:border-[#2a5f9e]"
+                                />
+                              </div>
+                              <div className="space-y-1">
+                                <label className="text-[9px] font-bold text-[#8c909a] uppercase">Amount ($) *</label>
+                                <input 
+                                  type="number"
+                                  value={upload.amount}
+                                  onChange={(e) => handleUpdatePendingUpload(upload.id, { amount: e.target.value })}
+                                  className="w-full bg-[#faf9f7] border border-[#e0dbd3] rounded-lg px-2 py-1.5 text-xs outline-none focus:border-[#2a5f9e]"
+                                />
+                              </div>
+                              <div className="space-y-1">
+                                <label className="text-[9px] font-bold text-[#8c909a] uppercase">Invoice #</label>
+                                <input 
+                                  type="text"
+                                  value={upload.invoiceNumber}
+                                  onChange={(e) => handleUpdatePendingUpload(upload.id, { invoiceNumber: e.target.value })}
+                                  className="w-full bg-[#faf9f7] border border-[#e0dbd3] rounded-lg px-2 py-1.5 text-xs outline-none focus:border-[#2a5f9e]"
+                                />
+                              </div>
+                              <div className="space-y-1">
+                                <label className="text-[9px] font-bold text-[#8c909a] uppercase">PO #</label>
+                                <input 
+                                  type="text"
+                                  value={upload.poNumber}
+                                  onChange={(e) => handleUpdatePendingUpload(upload.id, { poNumber: e.target.value })}
+                                  className="w-full bg-[#faf9f7] border border-[#e0dbd3] rounded-lg px-2 py-1.5 text-xs outline-none focus:border-[#2a5f9e]"
+                                />
+                              </div>
+                            </div>
                           )}
                         </div>
-                      ) : (
-                        <div className="flex items-center gap-3 p-3 bg-[#ecfdf5] border border-[#059669] rounded-lg">
-                          <div className="text-xl">✅</div>
-                          <div className="flex-1 min-w-0">
-                            <p className="text-xs font-medium truncate">{selectedFile?.name}</p>
-                            <p className="text-[10px] text-[#059669]">File ready for upload</p>
-                          </div>
-                          <button 
-                            onClick={() => fileInputRef.current?.click()}
-                            className="text-[10px] text-[#2a5f9e] hover:underline font-medium"
-                          >
-                            Change
-                          </button>
-                        </div>
-                      )}
+                      ))}
                     </div>
-
-                    <div className="grid grid-cols-2 gap-5">
-                      <div className="space-y-1.5">
-                        <label className="text-xs font-medium text-[#4a4e57]">Store *</label>
-                        <select 
-                          value={uploadStoreId}
-                          onChange={(e) => setUploadStoreId(e.target.value)}
-                          className="w-full bg-[#faf9f7] border border-[#e0dbd3] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#2a5f9e]"
-                        >
-                          <option value="">Select store...</option>
-                          {visibleStores.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-                        </select>
-                      </div>
-                      <div className="space-y-1.5">
-                        <label className="text-xs font-medium text-[#4a4e57]">Vendor Name *</label>
-                        <input 
-                          type="text" 
-                          list="vendor-list"
-                          value={uploadVendor}
-                          onChange={(e) => setUploadVendor(e.target.value)}
-                          placeholder="e.g. Sysco Foods" 
-                          className="w-full bg-[#faf9f7] border border-[#e0dbd3] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#2a5f9e]" 
-                        />
-                        <datalist id="vendor-list">
-                          {uniqueVendors.map(v => <option key={v} value={v} />)}
-                        </datalist>
-                      </div>
-                      <div className="space-y-1.5">
-                        <label className="text-xs font-medium text-[#4a4e57]">Invoice Date *</label>
-                        <input 
-                          type="date" 
-                          value={uploadDate}
-                          onChange={(e) => setUploadDate(e.target.value)}
-                          className="w-full bg-[#faf9f7] border border-[#e0dbd3] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#2a5f9e]" 
-                        />
-                      </div>
-                      <div className="space-y-1.5">
-                        <label className="text-xs font-medium text-[#4a4e57]">Amount ($) *</label>
-                        <input 
-                          type="number" 
-                          value={uploadAmount}
-                          onChange={(e) => setUploadAmount(e.target.value)}
-                          placeholder="0.00" 
-                          className="w-full bg-[#faf9f7] border border-[#e0dbd3] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#2a5f9e]" 
-                        />
-                      </div>
-                      <div className="space-y-1.5">
-                        <label className="text-xs font-medium text-[#4a4e57]">Invoice #</label>
-                        <input 
-                          type="text" 
-                          value={uploadInvNum}
-                          onChange={(e) => setUploadInvNum(e.target.value)}
-                          placeholder="INV-12345" 
-                          className="w-full bg-[#faf9f7] border border-[#e0dbd3] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#2a5f9e]" 
-                        />
-                      </div>
-                      <div className="space-y-1.5">
-                        <label className="text-xs font-medium text-[#4a4e57]">PO #</label>
-                        <input 
-                          type="text" 
-                          value={uploadPoNum}
-                          onChange={(e) => setUploadPoNum(e.target.value)}
-                          placeholder="PO-67890" 
-                          className="w-full bg-[#faf9f7] border border-[#e0dbd3] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#2a5f9e]" 
-                        />
-                      </div>
-                    </div>
-
-                    {previewApprovalChain.length > 0 && (
-                      <div className="mt-8 pt-8 border-t border-[#e0dbd3]">
-                        <label className="block text-xs font-medium text-[#4a4e57] mb-4 uppercase tracking-wider">Approval Chain</label>
-                        <div className="flex items-center gap-2 overflow-x-auto pb-2">
-                          {previewApprovalChain.map((step, idx) => (
-                            <React.Fragment key={idx}>
-                              <div className="flex flex-col items-center min-w-[100px]">
-                                <div className="w-8 h-8 rounded-full bg-[#eaf1fb] border border-[#2a5f9e] flex items-center justify-center text-[#2a5f9e] text-xs font-bold mb-1">
-                                  {idx + 1}
-                                </div>
-                                <span className="text-[10px] font-semibold text-[#1a1c21] whitespace-nowrap">{step.label}</span>
-                                <span className="text-[9px] text-[#8c909a] whitespace-nowrap">{step.name}</span>
-                              </div>
-                              {idx < previewApprovalChain.length - 1 && (
-                                <ChevronRight size={14} className="text-[#e0dbd3] mt-[-16px]" />
-                              )}
-                            </React.Fragment>
-                          ))}
-                        </div>
-                        <p className="text-[10px] text-[#8c909a] mt-3 italic">
-                          * Chain automatically updates based on store and amount thresholds ($500, $1,000, $5,000).
-                        </p>
-                      </div>
-                    )}
-
-                  <div className="flex justify-end gap-3 mt-10">
-                    <button onClick={() => setPage('dashboard')} className="px-4 py-2 text-sm font-medium text-[#4a4e57] hover:bg-black/5 rounded-lg transition-colors">Cancel</button>
-                    <button 
-                      onClick={handleSubmitInvoice}
-                      className="px-6 py-2 bg-[#2a5f9e] hover:bg-[#1d4a7d] text-white text-sm font-medium rounded-lg transition-colors shadow-sm"
-                    >
-                      Submit Invoice
-                    </button>
-                  </div>
+                  )}
                 </div>
-              </div>
-            </motion.div>
-          )}
+              </motion.div>
+            )}
           </AnimatePresence>
         </div>
       </main>
@@ -1059,8 +1289,16 @@ export default function App() {
                 {/* PDF Preview Area */}
                 <div className="flex-1 bg-[#faf9f7] border-r border-[#e0dbd3] flex flex-col items-center justify-center p-10 gap-6 overflow-y-auto">
                   {pdfPreviewUrl || activeInvoice.fileUrl ? (
-                    <div className="w-full max-w-2xl bg-white border border-[#e0dbd3] rounded-lg shadow-sm overflow-hidden">
-                      <img src={pdfPreviewUrl || activeInvoice.fileUrl} alt="Invoice Preview" className="w-full h-auto" referrerPolicy="no-referrer" />
+                    <div className="w-full max-w-3xl bg-white border border-[#e0dbd3] rounded-lg shadow-sm overflow-hidden h-full flex flex-col">
+                      {pdfPreviewUrl && !activeInvoice.fileUrl ? (
+                        <img src={pdfPreviewUrl} alt="Invoice Preview" className="w-full h-auto" />
+                      ) : (
+                        <iframe 
+                          src={activeInvoice.fileUrl} 
+                          className="w-full h-full min-h-[600px] border-none" 
+                          title="Invoice PDF"
+                        />
+                      )}
                     </div>
                   ) : (
                     <div className="w-full max-w-md aspect-[8.5/11] bg-white border border-[#e0dbd3] rounded-lg shadow-sm flex flex-col items-center justify-center gap-3 text-[#8c909a]">
@@ -1068,7 +1306,7 @@ export default function App() {
                       <span className="text-xs font-medium">{activeInvoice.invoiceNumber || activeInvoice.id}.pdf</span>
                       <div className="text-center px-6">
                         <span className="text-[10px] opacity-60 block mb-1">Preview not available.</span>
-                        <span className="text-[9px] opacity-40">Ensure Supabase Storage bucket "invoices" is public.</span>
+                        <span className="text-[9px] opacity-40">Ensure Supabase Storage bucket "invoices" is public and file was uploaded successfully.</span>
                       </div>
                     </div>
                   )}
@@ -1241,16 +1479,27 @@ export default function App() {
                   {/* Actions */}
                   <div className="p-6 bg-[#faf9f7] border-b border-[#e0dbd3]">
                     <div className="text-[10px] uppercase tracking-widest font-bold text-[#8c909a] mb-4">Actions</div>
-                    {canUserAct(currentUser, activeInvoice) ? (
-                      <div className="grid grid-cols-2 gap-2">
-                        <ActionButton icon={<CheckCircle2 size={14} />} label="Approve" color="#059669" onClick={() => handleAction('APPROVED', '')} />
-                        <ActionButton icon={<PauseCircle size={14} />} label="Hold" color="#7c3aed" onClick={() => handleAction('HOLD', '')} />
-                        <ActionButton icon={<XCircle size={14} />} label="Deny" color="#dc2626" onClick={() => handleAction('DENIED', '')} />
-                        <ActionButton icon={<RotateCcw size={14} />} label="Push Back" color="#c9a84c" onClick={() => handleAction('PUSH_BACK', '')} />
-                      </div>
-                    ) : (
-                      <div className="text-xs text-[#8c909a] italic">No actions available for your role at this stage.</div>
-                    )}
+                    <div className="space-y-2">
+                      {canUserAct(currentUser, activeInvoice) ? (
+                        <div className="grid grid-cols-2 gap-2">
+                          <ActionButton icon={<CheckCircle2 size={14} />} label="Approve" color="#059669" onClick={() => handleAction('APPROVED', '')} />
+                          <ActionButton icon={<PauseCircle size={14} />} label="Hold" color="#7c3aed" onClick={() => handleAction('HOLD', '')} />
+                          <ActionButton icon={<XCircle size={14} />} label="Deny" color="#dc2626" onClick={() => handleAction('DENIED', '')} />
+                          <ActionButton icon={<RotateCcw size={14} />} label="Push Back" color="#c9a84c" onClick={() => handleAction('PUSH_BACK', '')} />
+                        </div>
+                      ) : (
+                        <div className="text-xs text-[#8c909a] italic">No actions available for your role at this stage.</div>
+                      )}
+                      {canUserMarkAsPaid(currentUser, activeInvoice) && (
+                        <button 
+                          onClick={() => handleAction('PAID', 'Marked as paid from details view')}
+                          className="w-full bg-[#059669] hover:bg-[#047857] text-white py-2.5 rounded-lg text-xs font-bold shadow-lg shadow-[#059669]/20 transition-all flex items-center justify-center gap-2 mt-2"
+                        >
+                          <CheckCircle2 size={14} />
+                          <span>Mark as Paid</span>
+                        </button>
+                      )}
+                    </div>
                   </div>
 
                   {/* Comments */}
@@ -1343,28 +1592,34 @@ export default function App() {
                   <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="space-y-4">
                     {(() => {
                       const targetUser = USERS[reminderUserId];
-                      const pendingCount = invoices.filter(inv => canUserAct(targetUser, inv)).length;
-                      const subject = `Action Required: ${pendingCount} Pending Invoice${pendingCount === 1 ? '' : 's'} for Approval`;
-                      const body = `Hello ${targetUser.firstName},\n\nThis is a friendly reminder that you have ${pendingCount} pending invoice${pendingCount === 1 ? '' : 's'} awaiting your approval in the Invoice Tracker.\n\nPlease log in to review and take action:\nhttps://dossaniparadise.github.io/invoice-tracker/\n\nThank you,\nAccounting Team`;
+                      const pendingCount = invoices.filter(inv => {
+                        const currentStep = inv.requiredApprovals.find(s => s.role === inv.currentStage);
+                        return currentStep?.userId === targetUser.id;
+                      }).length;
+                      const sendTo = `${targetUser.email || targetUser.id + '@dossaniparadise.com'}`;
+                      const subject = `${pendingCount} Pending Invoice${pendingCount === 1 ? '' : 's'} to Approve`;
+                      const body = `Hello ${targetUser.firstName || targetUser.name.split(' ')[0]},\n\nYou have ${pendingCount} pending invoice${pendingCount === 1 ? '' : 's'} awaiting your approval in the Invoice Tracker.\n\nLink: https://dossaniparadise.github.io/invoice-tracker/`;
                       
                       return (
                         <>
                           <div className="bg-[#faf9f7] border border-[#e0dbd3] rounded-xl p-4 font-mono text-[11px] whitespace-pre-wrap">
-                            <div className="text-[#8c909a] mb-2 font-sans font-bold uppercase tracking-widest text-[9px]">Subject</div>
-                            <div className="mb-4 text-[#1a1c21]">{subject}</div>
-                            <div className="text-[#8c909a] mb-2 font-sans font-bold uppercase tracking-widest text-[9px]">Body</div>
+                            <div className="text-[#8c909a] mb-1 font-sans font-bold uppercase tracking-widest text-[9px]">Send to</div>
+                            <div className="mb-3 text-[#1a1c21]">{sendTo}</div>
+                            <div className="text-[#8c909a] mb-1 font-sans font-bold uppercase tracking-widest text-[9px]">Subject</div>
+                            <div className="mb-3 text-[#1a1c21]">{subject}</div>
+                            <div className="text-[#8c909a] mb-1 font-sans font-bold uppercase tracking-widest text-[9px]">Body</div>
                             <div className="text-[#1a1c21]">{body}</div>
                           </div>
 
                           <button 
                             onClick={() => {
-                              navigator.clipboard.writeText(`Subject: ${subject}\n\n${body}`);
+                              navigator.clipboard.writeText(`Send to: ${sendTo}\nSubject: ${subject}\n\n${body}`);
                               alert('Reminder template copied to clipboard!');
                             }}
                             className="w-full bg-[#2a5f9e] text-white py-3 rounded-xl font-bold hover:bg-[#1d4a7d] transition-all flex items-center justify-center gap-2"
                           >
                             <Copy size={16} />
-                            <span>Copy Full Email</span>
+                            <span>Copy Template</span>
                           </button>
                         </>
                       );
