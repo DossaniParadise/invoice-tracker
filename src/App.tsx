@@ -28,6 +28,7 @@ import {
   Send,
   Download,
   Copy,
+  Trash2,
   User as UserIcon
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
@@ -168,6 +169,8 @@ export default function App() {
   const [newPassword, setNewPassword] = useState('');
   const [isSupabaseConfigured, setIsSupabaseConfigured] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   // Upload Form State
   const [uploadStoreId, setUploadStoreId] = useState('');
@@ -387,6 +390,26 @@ export default function App() {
     setActiveInvoice(updatedInvoice);
   };
 
+  const handleDeleteInvoice = async () => {
+    if (!activeInvoice || !currentUser) return;
+    
+    setIsDeleting(true);
+    try {
+      if (isSupabaseConfigured) {
+        await invoiceService.deleteInvoice(activeInvoice.id);
+      } else {
+        setInvoices(prev => prev.filter(i => i.id !== activeInvoice.id));
+      }
+      setActiveInvoice(null);
+      setShowDeleteConfirm(false);
+    } catch (err) {
+      console.error('Failed to delete invoice:', err);
+      alert('Failed to delete invoice. Please check your permissions.');
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
   const handleAddComment = async () => {
     if (!activeInvoice || !currentUser || !newComment.trim() || isAddingComment) return;
 
@@ -575,7 +598,7 @@ export default function App() {
             handleUpdatePendingUpload(upload.id, { status: 'success' });
           } catch (err: any) {
             console.error('PDF Upload failed for bulk:', err);
-            handleUpdatePendingUpload(upload.id, { status: 'error', error: 'PDF Upload failed' });
+            handleUpdatePendingUpload(upload.id, { status: 'error', error: `Upload failed: ${err.message || 'Unknown error'}` });
           }
         } else {
           // Local mode
@@ -632,9 +655,9 @@ export default function App() {
           try {
             const fileUrl = await invoiceService.uploadInvoiceFile(selectedFile, createdInvoice.id);
             await invoiceService.updateInvoice(createdInvoice.id, { fileUrl });
-          } catch (uploadErr) {
+          } catch (uploadErr: any) {
             console.error('Failed to upload file to Supabase Storage:', uploadErr);
-            alert('Invoice data saved, but PDF upload failed. Please check Supabase Storage configuration.');
+            alert(`Invoice data saved, but PDF upload failed: ${uploadErr.message || 'Unknown error'}. Please check if the "invoices" bucket exists and has correct RLS policies.`);
           }
         }
       } catch (err) {
@@ -1280,6 +1303,39 @@ export default function App() {
                 <h2 className="text-base font-semibold tracking-tight">{activeInvoice.id} — {activeInvoice.vendor}</h2>
                 <Badge status={activeInvoice.status} />
                 <div className="flex-1" />
+                
+                {currentUser && (currentUser.id === 'it' || currentUser.id === 'husain') && (
+                  <div className="flex items-center gap-2">
+                    {showDeleteConfirm ? (
+                      <div className="flex items-center gap-2 bg-[#fef2f2] border border-[#dc2626]/20 rounded-lg px-2 py-1">
+                        <span className="text-[10px] font-bold text-[#dc2626] uppercase">Confirm Delete?</span>
+                        <button 
+                          onClick={handleDeleteInvoice}
+                          disabled={isDeleting}
+                          className="bg-[#dc2626] hover:bg-[#b91c1c] text-white text-[10px] font-bold px-2 py-1 rounded transition-colors disabled:opacity-50"
+                        >
+                          {isDeleting ? 'Deleting...' : 'Yes, Delete'}
+                        </button>
+                        <button 
+                          onClick={() => setShowDeleteConfirm(false)}
+                          className="text-[#8c909a] hover:text-[#1a1c21] text-[10px] font-bold px-2 py-1 transition-colors"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    ) : (
+                      <button 
+                        onClick={() => setShowDeleteConfirm(true)}
+                        className="flex items-center gap-1.5 text-[#dc2626] hover:bg-[#dc2626]/5 px-3 py-1.5 rounded-lg transition-colors text-xs font-medium"
+                      >
+                        <Trash2 size={14} />
+                        <span>Delete</span>
+                      </button>
+                    )}
+                    <div className="w-px h-4 bg-[#e0dbd3] mx-1" />
+                  </div>
+                )}
+
                 <button onClick={() => setActiveInvoice(null)} className="p-2 hover:bg-black/5 rounded-lg transition-colors">
                   <XCircle size={20} className="text-[#8c909a]" />
                 </button>

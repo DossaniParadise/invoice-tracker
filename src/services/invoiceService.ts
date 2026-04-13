@@ -33,7 +33,10 @@ export const invoiceService = {
 
     const { error: uploadError } = await supabase.storage
       .from('invoices')
-      .upload(filePath, file);
+      .upload(filePath, file, {
+        contentType: file.type,
+        upsert: false
+      });
 
     if (uploadError) throw uploadError;
 
@@ -55,6 +58,16 @@ export const invoiceService = {
     
     if (error) throw error;
     return data as Invoice;
+  },
+
+  async deleteInvoice(id: string) {
+    if (!supabase) throw new Error('Supabase not configured');
+    const { error } = await supabase
+      .from('invoices')
+      .delete()
+      .eq('id', id);
+    
+    if (error) throw error;
   },
 
   subscribeToInvoices(callback: (payload: any) => void) {
