@@ -30,7 +30,7 @@
 <script>
 window.APP_CONFIG = {
   // Shown in the footer for all users. Increment on every update.
-  version: "1.5",
+  version: "1.7",
   // Firestore
   firebase: {
     apiKey: "AIzaSyAxW6wajL9PH1Wlw3_QuBXgAMFgYWjkJp8",
@@ -113,12 +113,15 @@ window.APP_CONFIG = {
 import { initializeApp }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import {
-  getFirestore, collection, doc, addDoc, updateDoc, deleteDoc,
+  initializeFirestore, collection, doc, addDoc, updateDoc, deleteDoc,
   onSnapshot, query, orderBy, serverTimestamp
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 const app = initializeApp(window.APP_CONFIG.firebase);
-const db  = getFirestore(app);
+// Auto-detect long polling: corporate proxies and some browser extensions
+// block Firestore's default streaming transport, which makes writes hang
+// forever with no error. This falls back automatically.
+const db  = initializeFirestore(app, { experimentalAutoDetectLongPolling: true });
 
 // Exposed for the Babel-compiled script below (module scope is isolated).
 window.FS = {
@@ -567,6 +570,42 @@ function cleanForFirestore(obj) {
   return JSON.parse(JSON.stringify(obj));
 }
 
+/* ============================================================
+   FIRESTORE SELF-TEST
+   The SDK retries "backend unavailable" silently forever, which
+   makes a missing database look like a hung save. The REST API
+   answers honestly: 404 NOT_FOUND = the database was never
+   created; 403 = rules are blocking; 200 = healthy.
+   ============================================================ */
+async function probeFirestore() {
+  const pid = CFG.firebase.projectId;
+  const url = "https://firestore.googleapis.com/v1/projects/" + pid +
+              "/databases/(default)/documents/invoices?pageSize=1&key=" + CFG.firebase.apiKey;
+  try {
+    const res = await fetch(url);
+    const body = await res.json().catch(() => ({}));
+    const status = body && body.error && body.error.status;
+    if (res.ok) return { ok: true, verdict: "healthy",
+      message: "Firestore is reachable and readable." };
+    if (status === "NOT_FOUND" || res.status === 404) return { ok: false, verdict: "no-database",
+      message: "No Firestore database exists for project \"" + pid + "\". " +
+        "This project was auto-created for an API key and never got a database. " +
+        "Fix: open console.firebase.google.com → select this project → Build → " +
+        "Firestore Database → Create database. Until then, every save will hang." };
+    if (status === "PERMISSION_DENIED" || res.status === 403) return { ok: false, verdict: "rules",
+      message: "The database exists but security rules are blocking access. " +
+        "Fix: Firebase console → Firestore Database → Rules — for testing you can " +
+        "allow read/write, then lock down before go-live." };
+    return { ok: false, verdict: "other",
+      message: "Firestore responded with an unexpected error (" + res.status + "): " +
+        ((body.error && body.error.message) || "unknown") };
+  } catch (e) {
+    return { ok: false, verdict: "network",
+      message: "Couldn't reach firestore.googleapis.com at all — a VPN, proxy, " +
+        "or ad-blocker is blocking it. (" + (e.message || "network error") + ")" };
+  }
+}
+
 const invoiceService = {
   _col() { return window.FS.collection(window.FS.db, "invoices"); },
 
@@ -578,7 +617,13 @@ const invoiceService = {
   },
 
   async create(inv) {
-    const ref = await window.FS.addDoc(this._col(), cleanForFirestore(inv));
+    // If the write can't reach Firestore it retries silently forever; surface
+    // that as an error instead of a button stuck on "Saving…".
+    const write = window.FS.addDoc(this._col(), cleanForFirestore(inv));
+    const timeout = new Promise((_, rej) => setTimeout(() =>
+      rej(new Error("The save didn't reach the database within 20 seconds. " +
+                    "Check your connection (VPNs, proxies, and ad-blockers can block Firestore) and try again.")), 20000));
+    const ref = await Promise.race([write, timeout]);
     return ref.id;
   },
 
@@ -966,8 +1011,8 @@ function ViewAsModal({ dir, onPick, onClose }) {
 // entity, division, and manager, so "23086", "atlanta", or "al's" all work.
 // Searchable multi-select store picker. Matches on store number, name,
 // entity, division, and manager, so "23086", "atlanta", or "al's" all work.
-// Selecting clears the typed text and keeps the list open, so adding several
-// stores is type → Enter → type → Enter.
+// Selecting clears the typed text and CLOSES the menu — single store is the
+// common case. Focus the box again to add more stores.
 function StorePicker({ stores, selectedIds, onChange }) {
   const [q, setQ] = useState("");
   const [open, setOpen] = useState(false);
@@ -1000,8 +1045,9 @@ function StorePicker({ stores, selectedIds, onChange }) {
     onChange(selectedIds.includes(id)
       ? selectedIds.filter(x => x !== id)
       : [...selectedIds, id]);
-    setQ("");                                  // no leftover typed text
-    if (inputRef.current) inputRef.current.focus();
+    setQ("");          // no leftover typed text
+    setOpen(false);    // single store is the usual case — get out of the way.
+                       // Click or type again to add another.
   }
 
   function onKey(e) {
@@ -1684,8 +1730,32 @@ function InvoiceRow({ inv, users, currentUser, now, onAct, onMarkPaid, onDelete,
 }
 
 function SettingsPanel() {
+  const [check, setCheck] = useState(null);
+  const [checking, setChecking] = useState(false);
+  async function run() {
+    setChecking(true);
+    setCheck(await probeFirestore());
+    setChecking(false);
+  }
   return (
     <div className="space-y-4">
+      <div className="rounded-xl border bg-white p-5 shadow-sm">
+        <h2 className="text-sm font-semibold text-slate-900">Database connection check</h2>
+        <p className="mt-1 text-sm text-slate-500">
+          Tests the Firestore database directly and reports the exact problem if
+          saves are hanging.
+        </p>
+        <button onClick={run} disabled={checking}
+          className="mt-3 rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50">
+          {checking ? "Checking…" : "Run connection check"}
+        </button>
+        {check && (
+          <p className={"mt-3 rounded-lg px-3 py-2 text-sm " +
+            (check.ok ? "bg-emerald-50 text-emerald-800" : "bg-red-50 text-red-800")}>
+            {check.ok ? "✓ " : "✗ "}{check.message}
+          </p>
+        )}
+      </div>
       <div className="rounded-xl border bg-white p-5 shadow-sm">
         <h2 className="text-sm font-semibold text-slate-900">Approval rules</h2>
         <p className="mt-1 text-sm text-slate-500">Current routing configuration.</p>
@@ -1722,6 +1792,7 @@ function App() {
   const [tab, setTab]           = useState("inbox");
   const [err, setErr]           = useState("");
   const [now, setNow]           = useState(Date.now());
+  const [dbHealth, setDbHealth] = useState(null);   // Firestore self-test verdict
   const [filters, setFilters]   = useState({ status: "", division: "", store: "", approver: "", q: "" });
 
   // Directory load, then silently restore a saved session against the LIVE
@@ -1756,6 +1827,10 @@ function App() {
     const t = setInterval(() => setNow(Date.now()), 60000);
     return () => clearInterval(t);
   }, []);
+
+  // One startup probe: a missing database or blocked rules otherwise present
+  // as saves that hang forever with no console error.
+  useEffect(() => { probeFirestore().then(setDbHealth); }, []);
 
   function signIn(sess, creds) {
     setSession(sess);
@@ -1863,6 +1938,13 @@ function App() {
 
       {showViewAs && (
         <ViewAsModal dir={dir} onPick={startViewAs} onClose={() => setShowVA(false)} />
+      )}
+
+      {dbHealth && !dbHealth.ok && (
+        <div className="mb-4 rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800">
+          <p className="font-semibold">Database problem — saves will not work</p>
+          <p className="mt-1">{dbHealth.message}</p>
+        </div>
       )}
 
       {err && (
