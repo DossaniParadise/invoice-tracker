@@ -30,7 +30,7 @@
 <script>
 window.APP_CONFIG = {
   // Shown in the footer for all users. Increment on every update.
-  version: "1.4",
+  version: "1.5",
   // Firestore
   firebase: {
     apiKey: "AIzaSyAxW6wajL9PH1Wlw3_QuBXgAMFgYWjkJp8",
@@ -251,12 +251,13 @@ function buildStoreChainSteps(store, amount, users) {
   }
 
   if (store.directorId && users[store.directorId]) {
-    steps.push({
+    const dirStep = {
       role: "DIRECTOR", label: "Director of Ops",
       userIds: [store.directorId], userId: store.directorId,
-      name: nameOf(store.directorId),
-      note: acIds.length ? undefined : "No District Manager — starts here"
-    });
+      name: nameOf(store.directorId)
+    };
+    if (!acIds.length) dirStep.note = "No District Manager — starts here";
+    steps.push(dirStep);
   }
 
   if (amount >= CFG.vpThreshold) {
@@ -560,6 +561,12 @@ function slaTitle(s) {
    Same method names as the old Supabase service so the UI that
    gets ported later needs no changes.
    ============================================================ */
+// Firestore rejects `undefined` anywhere in a document. Strip it before
+// every write so one optional field can never sink a submission again.
+function cleanForFirestore(obj) {
+  return JSON.parse(JSON.stringify(obj));
+}
+
 const invoiceService = {
   _col() { return window.FS.collection(window.FS.db, "invoices"); },
 
@@ -571,12 +578,13 @@ const invoiceService = {
   },
 
   async create(inv) {
-    const ref = await window.FS.addDoc(this._col(), inv);
+    const ref = await window.FS.addDoc(this._col(), cleanForFirestore(inv));
     return ref.id;
   },
 
   async update(id, patch) {
-    await window.FS.updateDoc(window.FS.doc(window.FS.db, "invoices", id), patch);
+    await window.FS.updateDoc(window.FS.doc(window.FS.db, "invoices", id),
+      cleanForFirestore(patch));
   },
 
   async remove(id) {
@@ -1058,7 +1066,7 @@ function StorePicker({ stores, selectedIds, onChange }) {
   );
 }
 
-function NewInvoice({ stores, users, currentUser, onDone }) {
+function NewInvoice({ stores, users, currentUser, knownVendors, onDone }) {
   const fs = useFilestack();
   const [storeIds, setStoreIds] = useState([]);
   const [vendor, setVendor]   = useState("");
@@ -1068,6 +1076,27 @@ function NewInvoice({ stores, users, currentUser, onDone }) {
   const [busy, setBusy]       = useState(false);
   const [uploading, setUploading] = useState(false);
   const [err, setErr]         = useState("");
+
+  const vendorOptions = useMemo(() => {
+    let local = [];
+    try { local = JSON.parse(localStorage.getItem("ap_vendor_history") || "[]"); } catch (e) {}
+    const seen = new Map();
+    [...(knownVendors || []), ...local].forEach(v => {
+      const t = (v || "").trim();
+      if (t && !seen.has(t.toLowerCase())) seen.set(t.toLowerCase(), t);
+    });
+    return [...seen.values()].sort((a, b) => a.localeCompare(b));
+  }, [knownVendors]);
+
+  function rememberVendor(v) {
+    try {
+      const t = (v || "").trim();
+      if (!t) return;
+      let local = JSON.parse(localStorage.getItem("ap_vendor_history") || "[]");
+      local = [t, ...local.filter(x => x.toLowerCase() !== t.toLowerCase())].slice(0, 100);
+      localStorage.setItem("ap_vendor_history", JSON.stringify(local));
+    } catch (e) { /* storage full or blocked — autofill just won't learn */ }
+  }
 
   const selStores = stores.filter(s => storeIds.includes(s.id));
   const amt   = parseFloat(amount) || 0;
@@ -1134,6 +1163,7 @@ function NewInvoice({ stores, users, currentUser, onDone }) {
         createdBy: currentUser.id,
         createdByName: currentUser.name
       });
+      rememberVendor(vendor);
       setVendor(""); setAmount(""); setInvoiceNumber(""); setFile(null); setStoreIds([]);
       onDone && onDone();
     } catch (e) {
@@ -1241,7 +1271,12 @@ function NewInvoice({ stores, users, currentUser, onDone }) {
           <label className="text-sm">
             <span className="text-slate-600">Vendor</span>
             <input value={vendor} onChange={e => setVendor(e.target.value)}
+              list="vendor-suggestions" autoComplete="off"
+              placeholder="Start typing — past vendors suggest themselves"
               className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+            <datalist id="vendor-suggestions">
+              {vendorOptions.map(v => <option key={v} value={v} />)}
+            </datalist>
           </label>
 
           <label className="text-sm">
@@ -1252,7 +1287,7 @@ function NewInvoice({ stores, users, currentUser, onDone }) {
           </label>
 
           <label className="text-sm">
-            <span className="text-slate-600">Invoice #</span>
+            <span className="text-slate-600">Invoice # <span className="text-slate-400">(optional)</span></span>
             <input value={invoiceNumber} onChange={e => setInvoiceNumber(e.target.value)}
               className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" />
           </label>
@@ -1511,7 +1546,7 @@ function ChainCard({ inv, chain, chainIdx, currentUser, now, onAct, canFinance }
   );
 }
 
-function InvoiceRow({ inv, users, currentUser, now, onAct, onMarkPaid, canFinance }) {
+function InvoiceRow({ inv, users, currentUser, now, onAct, onMarkPaid, onDelete, canFinance }) {
   const [open, setOpen] = useState(false);
   const chains = getChains(inv);
   const mineAny = canUserAct(currentUser, inv) && !currentUser._sim;
@@ -1573,6 +1608,13 @@ function InvoiceRow({ inv, users, currentUser, now, onAct, onMarkPaid, canFinanc
             className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-50">
             {showChains ? "Hide" : "Details"}
           </button>
+          {canFinance && (
+            <button onClick={() => onDelete(inv)}
+              title="Delete this invoice"
+              className="rounded-lg border border-red-200 px-3 py-1.5 text-sm text-red-600 hover:bg-red-50">
+              Delete
+            </button>
+          )}
         </div>
       </div>
 
@@ -1642,38 +1684,8 @@ function InvoiceRow({ inv, users, currentUser, now, onAct, onMarkPaid, canFinanc
 }
 
 function SettingsPanel() {
-  const dash = "https://dev.filestack.com/apps/" + CFG.filestackApiKey + "/usage";
   return (
     <div className="space-y-4">
-      <div className="rounded-xl border bg-white p-5 shadow-sm">
-        <h2 className="text-sm font-semibold text-slate-900">File storage — Filestack</h2>
-        <p className="mt-1 text-sm text-slate-500">
-          Invoice PDFs are stored in Filestack. Upload counts, storage, and delivery
-          quotas live in the Filestack dashboard.
-        </p>
-
-        <dl className="mt-4 grid gap-2 text-sm sm:grid-cols-2">
-          <div className="flex justify-between rounded-lg bg-slate-50 px-3 py-2">
-            <dt className="text-slate-500">App key</dt>
-            <dd className="font-mono text-slate-700">{CFG.filestackApiKey}</dd>
-          </div>
-          <div className="flex justify-between rounded-lg bg-slate-50 px-3 py-2">
-            <dt className="text-slate-500">Upload path</dt>
-            <dd className="font-mono text-slate-700">/invoices/&lt;store#&gt;/</dd>
-          </div>
-        </dl>
-
-        <a href={dash} target="_blank" rel="noopener noreferrer"
-           className="mt-4 inline-flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2
-                      text-sm font-medium text-white hover:bg-slate-800">
-          Open Filestack dashboard ↗
-        </a>
-        <p className="mt-2 text-xs text-slate-400">
-          Opens Filestack in a new tab. You'll need to be signed in to the Filestack account.
-          Live usage bars (uploads, storage, delivery) are shown there.
-        </p>
-      </div>
-
       <div className="rounded-xl border bg-white p-5 shadow-sm">
         <h2 className="text-sm font-semibold text-slate-900">Approval rules</h2>
         <p className="mt-1 text-sm text-slate-500">Current routing configuration.</p>
@@ -1872,7 +1884,8 @@ function App() {
           preview the right rail. */}
       {canCreate && !session._sim && (
         <div className="mb-4">
-          <NewInvoice stores={dir.stores} users={dir.users} currentUser={session} />
+          <NewInvoice stores={dir.stores} users={dir.users} currentUser={session}
+                      knownVendors={[...new Set(invoices.map(i => i.vendor).filter(Boolean))]} />
         </div>
       )}
 
@@ -1908,7 +1921,7 @@ function App() {
         )}
         {shown.map(inv => (
           <InvoiceRow key={inv.id} inv={inv} users={dir.users} currentUser={session}
-                      now={now} onAct={act} onMarkPaid={markPaid}
+                      now={now} onAct={act} onMarkPaid={markPaid} onDelete={deleteInvoice}
                       canFinance={canSeeAll && !session._sim} />
         ))}
       </div>
@@ -1954,6 +1967,20 @@ function App() {
       status: deriveStatus(chains),
       updatedAt: ts
     });
+  }
+
+  async function deleteInvoice(inv) {
+    if (session._sim) { setErr("You're viewing as someone else. Return to your account to act."); return; }
+    const ok = window.confirm(
+      "Delete this invoice from " + (inv.vendor || "unknown vendor") +
+      " for $" + Number(inv.amount || 0).toLocaleString() +
+      "?\n\nThis removes it for everyone and cannot be undone.");
+    if (!ok) return;
+    try {
+      await invoiceService.remove(inv.id);
+    } catch (e) {
+      setErr("Couldn't delete: " + (e.message || "unknown error"));
+    }
   }
 
   async function markPaid(inv) {
