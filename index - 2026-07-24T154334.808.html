@@ -1,0 +1,1589 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>AP Invoice Routing</title>
+
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://static.filestackapi.com/filestack-js/3.x.x/filestack.min.js"></script>
+
+<style>
+  body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .sla-ok    { background:#ecfdf5; color:#065f46; border-color:#a7f3d0; }
+  .sla-warn  { background:#fffbeb; color:#92400e; border-color:#fde68a; }
+  .sla-late  { background:#fef2f2; color:#991b1b; border-color:#fecaca; }
+  @keyframes pulseLate { 0%,100%{opacity:1} 50%{opacity:.55} }
+  .sla-late-pulse { animation: pulseLate 1.6s ease-in-out infinite; }
+</style>
+</head>
+<body class="bg-slate-100">
+
+<div id="root" class="min-h-screen"></div>
+
+<!-- ============================================================
+     CONFIG — fill these in
+     ============================================================ -->
+<script>
+window.APP_CONFIG = {
+  // Firestore
+  firebase: {
+    apiKey: "AIzaSyAxW6wajL9PH1Wlw3_QuBXgAMFgYWjkJp8",
+    authDomain: "gen-lang-client-0357067758.firebaseapp.com",
+    projectId: "gen-lang-client-0357067758",
+    storageBucket: "gen-lang-client-0357067758.firebasestorage.app",
+    messagingSenderId: "169864973972",
+    appId: "1:169864973972:web:e68c48e1faaa11e21aae81"
+  },
+
+  // Filestack. This key is public by design (it ships in the HTML). Lock the
+  // app down in the Filestack dashboard with domain/referrer restrictions,
+  // otherwise anyone who views source can upload against your quota.
+  filestackApiKey: "Afe1LdETdKFIBOgrA4TgLz",
+
+  // Directory / alignment API (read-only here)
+  directoryUrl: "https://alignment-api-khaki.vercel.app/api/dpm-alignment",
+
+  // VP of Operations. There is no VP role in the directory, so the VP is named
+  // here. Sam ALSO appears in the directory as a DIRECTOR (of C-Store and car
+  // wash) under a different id. Both ids are listed so that when he is already
+  // an approver earlier in a chain we skip the duplicate VP step rather than
+  // asking the same person to sign twice.
+  vp: {
+    id: "-OtoOJ1DdsHufb-We3BH",              // his real directory id
+    directoryId: "-OtoOJ1DdsHufb-We3BH",
+    name: "Sam Merchant",
+    email: "Sam@dossaniparadise.com"
+  },
+
+  // --- Identity -------------------------------------------------------------
+  // Same model as the maintenance app: you enter your email, and the password
+  // proves which ROLE you hold. The email is resolved against the live
+  // directory, so nobody's identity is hardcoded here.
+  rolePasswords: {
+    admin:    "Overwatch@76051",
+    finance:  "Finance@76051",
+    director: "DO@76051",
+    coach:    "AC@76051",
+    manager:  "Dossani@76051",
+    tech:     "Repair@76051"
+  },
+
+  // Full admin view + can impersonate anyone.
+  adminEmails: ["itsupport@dossaniparadise.com"],
+
+  // Finance / AP team. These people are NOT in the alignment directory yet.
+  // When they are added, delete them here and they will resolve automatically —
+  // the directory always wins over this list.
+  financeUsers: [
+    { email: "kathreen@dossaniparadise.com", name: "Kathreen Mourad" },
+    { email: "aali@dossaniparadise.com",     name: "Anwer Ali" },
+    { email: "anila@dossaniparadise.com",    name: "Anila Dossani" },
+    { email: "husain@dossaniparadise.com",   name: "Husain Virani" }
+  ],
+
+  // Routing rules
+  vpThreshold: 2500,      // >= this amount adds the VP step
+
+  // --- SLA clock ------------------------------------------------------------
+  // The clock only counts business time: Mon-Fri, 08:00-17:00 local. It does
+  // not pause for comments and is not affected by anything except the approver
+  // pressing Approve or Reject.
+  //
+  // Configured and displayed in BUSINESS DAYS. A business day is one full
+  // 08:00-17:00 window (9 hours), so 2 days = 18 business hours. Users never
+  // see hours anywhere in the UI.
+  slaDays: 2,
+  businessHours: {
+    startHour: 8,          // 08:00
+    endHour: 17,           // 17:00
+    days: [1, 2, 3, 4, 5], // Mon-Fri (0 = Sunday)
+    // Dates with no business time, "YYYY-MM-DD". Add company holidays here.
+    holidays: []
+  }
+};
+</script>
+
+<script type="module">
+import { initializeApp }
+  from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import {
+  getFirestore, collection, doc, addDoc, updateDoc, deleteDoc,
+  onSnapshot, query, orderBy, serverTimestamp
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+const app = initializeApp(window.APP_CONFIG.firebase);
+const db  = getFirestore(app);
+
+// Exposed for the Babel-compiled script below (module scope is isolated).
+window.FS = {
+  db, collection, doc, addDoc, updateDoc, deleteDoc,
+  onSnapshot, query, orderBy, serverTimestamp
+};
+window.dispatchEvent(new Event("firebase-ready"));
+</script>
+
+<script type="text/babel">
+const { useState, useEffect, useMemo, useRef } = React;
+const CFG = window.APP_CONFIG;
+
+/* ============================================================
+   1. DIRECTORY ADAPTER
+   Maps the alignment API onto the shapes the UI expects.
+   Nothing is hardcoded: every approver is resolved from the API.
+   ============================================================ */
+
+// Division is not a field in the directory, so it is derived from the store
+// name. Car Wash is tested FIRST — "Paradise Car Wash #1" would otherwise be
+// caught by the Paradise/C-Store rule. Anything unmatched surfaces as
+// "Unknown" rather than silently defaulting, so new store types get noticed.
+function deriveDivision(storeName) {
+  const n = (storeName || "").toLowerCase();
+  if (n.includes("car wash")) return "Car Wash";
+  if (n.startsWith("burger king") || n.startsWith("subway")) return "Fast Food";
+  if (n.startsWith("paradise quick stop") ||
+      n.startsWith("scarborough travel stop") ||
+      n.startsWith("7-eleven")) return "C-Store";
+  return "Unknown";
+}
+
+// The directory has two record generations:
+//   newer DFW stores -> assignedAreaCoachId  (string, sometimes "")
+//   older stores     -> assignedAreaCoachIds (array) AND the singular field
+// Reading only the plural field silently drops the AC on ~45 DFW stores.
+function readCoachIds(rest) {
+  const plural = rest.assignedAreaCoachIds;
+  if (Array.isArray(plural) && plural.length) return plural.filter(Boolean);
+  const single = rest.assignedAreaCoachId;
+  return single ? [single] : [];
+}
+
+const directoryService = {
+  async load() {
+    const bust = (CFG.directoryUrl.includes("?") ? "&" : "?") + "_=" + Date.now();
+    const res = await fetch(CFG.directoryUrl + bust, { cache: "no-store" });
+    if (!res.ok) throw new Error("Directory API " + res.status);
+    const data = await res.json();
+
+    const coaches   = data.areaCoaches || {};
+    const directors = data.directors   || {};
+    const rests     = data.restaurants || {};
+
+    // Flat user map: id -> { id, name, email, role }
+    const users = {};
+    Object.values(directors).forEach(d => {
+      users[d.id] = { id: d.id, name: d.name, email: d.email || "", role: "DIRECTOR" };
+    });
+    Object.values(coaches).forEach(c => {
+      // A person can appear as both; DIRECTOR already registered wins for role,
+      // but we still want them selectable as an Area Coach approver.
+      if (!users[c.id]) {
+        users[c.id] = { id: c.id, name: c.name, email: c.email || "", role: "AREA_COACH" };
+      }
+    });
+    // There is no VP role in the directory, so register the VP from config.
+    // If that id already exists (Sam is also a Director), keep the existing
+    // record and just note the extra role rather than overwriting it.
+    if (users[CFG.vp.id]) {
+      users[CFG.vp.id].alsoVP = true;
+    } else {
+      users[CFG.vp.id] = { id: CFG.vp.id, name: CFG.vp.name, email: CFG.vp.email, role: "VP" };
+    }
+
+    const stores = Object.values(rests).map(r => ({
+      id: r.id,
+      name: r.storeName || "(unnamed)",
+      storeNumber: r.storeNumber || "",
+      division: deriveDivision(r.storeName),
+      acIds: readCoachIds(r),
+      directorId: r.assignedDirectorId || null,
+      storeManager: r.storeManager || "",
+      email: r.email || "",          // store mailbox — managers sign in with this
+      address: r.address || ""
+    })).sort((a, b) => a.name.localeCompare(b.name));
+
+    return { users, stores };
+  }
+};
+
+/* ============================================================
+   2. APPROVAL CHAIN
+   AC -> DO, plus VP when amount >= threshold.
+   No AC on the store  -> starts at DO.
+   Multiple ACs        -> any one of them can approve (userIds).
+   Director is the VP  -> skip the duplicate VP step.
+   ============================================================ */
+function buildApprovalChain(store, amount, users) {
+  const steps = [];
+  const nameOf = id => (users[id] && users[id].name) || "Unknown";
+
+  const acIds = (store.acIds || []).filter(id => users[id]);
+  if (acIds.length) {
+    steps.push({
+      role: "AREA_COACH",
+      label: "Area Coach / DM",
+      userIds: acIds,
+      userId: acIds[0],
+      name: acIds.map(nameOf).join(" or ")
+    });
+  }
+
+  if (store.directorId && users[store.directorId]) {
+    steps.push({
+      role: "DIRECTOR",
+      label: "Director of Ops",
+      userIds: [store.directorId],
+      userId: store.directorId,
+      name: nameOf(store.directorId),
+      note: acIds.length ? undefined : "No Area Coach on this store — starts here"
+    });
+  }
+
+  if (amount >= CFG.vpThreshold) {
+    // Sam is the assigned DIRECTOR for C-Store/car wash stores, under a
+    // different id than the VP entry. Compare against every id we know maps to
+    // him, or a $3,000 Quick Stop invoice routes "Sam -> Sam".
+    const vpIds = [CFG.vp.id, CFG.vp.directoryId].filter(Boolean);
+    const alreadySigned = steps.some(s => s.userIds.some(id => vpIds.includes(id)));
+    if (!alreadySigned) {
+      steps.push({
+        role: "VP",
+        label: "VP of Ops",
+        userIds: [CFG.vp.id],
+        userId: CFG.vp.id,
+        name: CFG.vp.name,
+        note: "Invoices $" + CFG.vpThreshold.toLocaleString() + "+"
+      });
+    }
+  }
+
+  return steps;
+}
+
+function canUserAct(user, inv) {
+  if (!user || !inv) return false;
+  if (inv.status !== "PENDING") return false;
+  const step = (inv.requiredApprovals || []).find(s => s.role === inv.currentStage);
+  if (!step) return false;
+  return (step.userIds || [step.userId]).includes(user.id);
+}
+
+/* ============================================================
+   2b. IDENTITY — email + role password
+   The email is resolved against the LIVE directory; the password
+   only proves which role you hold. Nobody's identity is hardcoded,
+   so people added to the directory can sign in immediately.
+   ============================================================ */
+
+function resolveSession(email, pw, dir) {
+  const lc = (email || "").trim().toLowerCase();
+  if (!lc || !pw) return { error: "Enter your email and password." };
+
+  const P = CFG.rolePasswords;
+  const emailOf = o => (o && o.email ? o.email : "").toLowerCase();
+
+  // 1. Admin — full view, can impersonate anyone.
+  if (CFG.adminEmails.map(e => e.toLowerCase()).includes(lc)) {
+    if (pw !== P.admin) return { error: "That password doesn't match the admin role." };
+    return { id: "admin:" + lc, email: lc, name: "IT Support", role: "ADMIN", scope: "all" };
+  }
+
+  // 2. Finance / AP. Directory first so that once these people are added
+  //    upstream, the live record wins over the fallback list below.
+  const dirFinance = Object.values(dir.users).find(
+    u => emailOf(u) === lc && u.role === "FINANCE");
+  if (dirFinance) {
+    if (pw !== P.finance) return { error: "That password doesn't match the finance role." };
+    return { id: dirFinance.id, email: lc, name: dirFinance.name, role: "FINANCE", scope: "all" };
+  }
+  const seeded = CFG.financeUsers.find(u => u.email.toLowerCase() === lc);
+  if (seeded) {
+    if (pw !== P.finance) return { error: "That password doesn't match the finance role." };
+    return { id: "fin:" + lc, email: lc, name: seeded.name, role: "FINANCE", scope: "all" };
+  }
+
+  // 3. Director of Ops
+  const director = Object.values(dir.users).find(
+    u => emailOf(u) === lc && u.role === "DIRECTOR");
+  if (director) {
+    if (pw !== P.director) return { error: "That password doesn't match the director role." };
+    return { id: director.id, email: lc, name: director.name, role: "DIRECTOR", scope: "director" };
+  }
+
+  // 4. Area Coach / District Manager
+  const coach = Object.values(dir.users).find(
+    u => emailOf(u) === lc && u.role === "AREA_COACH");
+  if (coach) {
+    if (pw !== P.coach) return { error: "That password doesn't match the area coach role." };
+    return { id: coach.id, email: lc, name: coach.name, role: "AREA_COACH", scope: "stores" };
+  }
+
+  // 5. Store manager — matched on the store's own email address.
+  const store = dir.stores.find(s => (s.email || "").toLowerCase() === lc);
+  if (store) {
+    if (pw !== P.manager) return { error: "That password doesn't match the store role." };
+    return { id: "store:" + store.id, email: lc, name: store.storeManager || store.name,
+             role: "MANAGER", scope: "single", storeId: store.id };
+  }
+
+  return { error: "We couldn't find that email in the directory. Check it's the email on file." };
+}
+
+// Impersonated sessions use the SAME shape resolveSession returns, so the
+// simulated view is exactly what that person would see.
+function buildImpersonatedSession(u, dir) {
+  if (u.kind === "store") {
+    const s = dir.stores.find(x => x.id === u.id);
+    if (!s) return null;
+    return { id: "store:" + s.id, email: (s.email || "").toLowerCase(),
+             name: s.storeManager || s.name, role: "MANAGER",
+             scope: "single", storeId: s.id, _sim: true };
+  }
+  const person = dir.users[u.id];
+  if (!person) return null;
+  return { id: person.id, email: (person.email || "").toLowerCase(),
+           name: person.name, role: person.role,
+           scope: person.role === "DIRECTOR" ? "director" : "stores", _sim: true };
+}
+
+// Everyone an admin can view as.
+function viewAsRoster(dir) {
+  const rows = [];
+  Object.values(dir.users).forEach(u => {
+    rows.push({ kind: "user", id: u.id, primary: u.name,
+                secondary: (u.role || "").replace("_", " "),
+                search: (u.name + " " + (u.email || "") + " " + u.role).toLowerCase() });
+  });
+  CFG.financeUsers.forEach(f => {
+    if (Object.values(dir.users).some(u => (u.email || "").toLowerCase() === f.email.toLowerCase())) return;
+    rows.push({ kind: "finance", id: "fin:" + f.email.toLowerCase(), primary: f.name,
+                secondary: "Finance", search: (f.name + " " + f.email + " finance").toLowerCase() });
+  });
+  dir.stores.forEach(s => {
+    rows.push({ kind: "store", id: s.id,
+                primary: s.storeManager || "(no manager on file)",
+                secondary: s.name,
+                search: (s.name + " " + s.storeNumber + " " + (s.storeManager || "")).toLowerCase() });
+  });
+  return rows;
+}
+
+/* ============================================================
+   3. SLA TIMER — business hours only
+   Mon-Fri 08:00-17:00. Nights, weekends and configured holidays
+   contribute nothing. The clock is NOT paused or reset by
+   comments; it stops only when the approver approves or rejects,
+   and restarts from zero for the next approver in the chain.
+   Colour is always derived from stageEnteredAt, never stored, so
+   it cannot go stale in the database.
+   ============================================================ */
+const BH = CFG.businessHours;
+
+function isBusinessDay(d) {
+  if (!BH.days.includes(d.getDay())) return false;
+  const iso = d.getFullYear() + "-" +
+              String(d.getMonth() + 1).padStart(2, "0") + "-" +
+              String(d.getDate()).padStart(2, "0");
+  return !(BH.holidays || []).includes(iso);
+}
+
+// Minutes of business time between two instants.
+function businessMinutesBetween(from, to) {
+  if (to <= from) return 0;
+  let mins = 0;
+  const cur = new Date(from);
+  let guard = 0;
+  while (cur < to && guard++ < 4000) {
+    if (isBusinessDay(cur)) {
+      const open  = new Date(cur); open.setHours(BH.startHour, 0, 0, 0);
+      const close = new Date(cur); close.setHours(BH.endHour, 0, 0, 0);
+      const s = cur > open ? cur : open;
+      const e = to < close ? to : close;
+      if (e > s) mins += (e - s) / 60000;
+    }
+    cur.setDate(cur.getDate() + 1);
+    cur.setHours(0, 0, 0, 0);
+  }
+  return mins;
+}
+
+// The instant at which `minutes` of business time will have elapsed.
+function addBusinessMinutes(from, minutes) {
+  let left = minutes;
+  const cur = new Date(from);
+  let guard = 0;
+  while (left > 0 && guard++ < 4000) {
+    if (isBusinessDay(cur)) {
+      const open  = new Date(cur); open.setHours(BH.startHour, 0, 0, 0);
+      const close = new Date(cur); close.setHours(BH.endHour, 0, 0, 0);
+      const s = cur > open ? new Date(cur) : open;
+      if (s < close) {
+        const avail = (close - s) / 60000;
+        if (avail >= left) return new Date(s.getTime() + left * 60000);
+        left -= avail;
+      }
+    }
+    cur.setDate(cur.getDate() + 1);
+    cur.setHours(0, 0, 0, 0);
+  }
+  return new Date(from + minutes * 60000);
+}
+
+// Hours in one full business day, derived from the configured window.
+const BIZ_DAY_HOURS = BH.endHour - BH.startHour;
+const SLA_HOURS = CFG.slaDays * BIZ_DAY_HOURS;
+
+function slaState(inv, now) {
+  if (!inv.stageEnteredAt || inv.status !== "PENDING") return null;
+  const usedH = businessMinutesBetween(new Date(inv.stageEnteredAt), new Date(now)) / 60;
+  const remainingH = SLA_HOURS - usedH;
+  const dueAt = addBusinessMinutes(new Date(inv.stageEnteredAt), SLA_HOURS * 60);
+  let level = "ok";
+  if (usedH >= SLA_HOURS) level = "late";
+  else if (usedH >= SLA_HOURS / 2) level = "warn";
+  // Outside working hours the clock is frozen — worth showing so an approver
+  // doesn't think the display is broken.
+  const paused = !isBusinessDay(new Date(now)) ||
+                 new Date(now).getHours() < BH.startHour ||
+                 new Date(now).getHours() >= BH.endHour;
+  return {
+    usedH, remainingH, level, dueAt, paused,
+    usedDays: usedH / BIZ_DAY_HOURS,
+    remainingDays: remainingH / BIZ_DAY_HOURS
+  };
+}
+
+// Everything users see is in business days — never hours.
+function dayWord(n) { return n === 1 ? "day" : "days"; }
+
+// Human phrase for the SLA window, used in banners and tooltips.
+const SLA_PHRASE = CFG.slaDays + " business " + dayWord(CFG.slaDays);
+
+function slaLabel(s) {
+  if (!s) return "";
+  if (s.level === "late") {
+    const over = s.usedDays - CFG.slaDays;
+    if (over < 1) return "Overdue";
+    const d = Math.floor(over);
+    return d + " " + dayWord(d) + " overdue";
+  }
+  // Round up so a partly-used day still reads as a day remaining, and never
+  // show "0 days left" while the invoice is still inside its window.
+  const left = Math.max(1, Math.ceil(s.remainingDays));
+  return left + " business " + dayWord(left) + " left";
+}
+
+function slaTitle(s) {
+  if (!s) return "";
+  const due = s.dueAt.toLocaleString(undefined,
+    { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  return "Due " + due + " · " + SLA_PHRASE + " (Mon-Fri " + BH.startHour + ":00-" + BH.endHour + ":00)" +
+         (s.paused ? " · clock paused outside working hours" : "");
+}
+
+/* ============================================================
+   4. INVOICE SERVICE — Firestore
+   Same method names as the old Supabase service so the UI that
+   gets ported later needs no changes.
+   ============================================================ */
+const invoiceService = {
+  _col() { return window.FS.collection(window.FS.db, "invoices"); },
+
+  subscribe(cb, onErr) {
+    const q = window.FS.query(this._col(), window.FS.orderBy("createdAt", "desc"));
+    return window.FS.onSnapshot(q,
+      snap => cb(snap.docs.map(d => ({ id: d.id, ...d.data() }))),
+      err  => onErr && onErr(err));
+  },
+
+  async create(inv) {
+    const ref = await window.FS.addDoc(this._col(), inv);
+    return ref.id;
+  },
+
+  async update(id, patch) {
+    await window.FS.updateDoc(window.FS.doc(window.FS.db, "invoices", id), patch);
+  },
+
+  async remove(id) {
+    await window.FS.deleteDoc(window.FS.doc(window.FS.db, "invoices", id));
+  }
+};
+
+/* ============================================================
+   4b. COMMENTS — invoices/{id}/comments subcollection
+   Kept out of the invoice document so that a long thread cannot
+   push the doc toward Firestore's 1MB ceiling, and so two people
+   posting at once don't overwrite each other.
+   Commenting never touches stageEnteredAt: the SLA clock is not
+   affected by discussion, only by Approve/Reject.
+   ============================================================ */
+const commentService = {
+  _col(invoiceId) {
+    return window.FS.collection(window.FS.db, "invoices", invoiceId, "comments");
+  },
+
+  subscribe(invoiceId, cb, onErr) {
+    const q = window.FS.query(this._col(invoiceId), window.FS.orderBy("ts", "asc"));
+    return window.FS.onSnapshot(q,
+      snap => cb(snap.docs.map(d => ({ id: d.id, ...d.data() }))),
+      err  => onErr && onErr(err));
+  },
+
+  async add(invoiceId, author, text) {
+    await window.FS.addDoc(this._col(invoiceId), {
+      userId: author.id,
+      userName: author.name,
+      userRole: author.role,
+      text: String(text).trim(),
+      ts: Date.now()
+    });
+  }
+};
+
+/* ============================================================
+   5. FILESTACK — PDF upload
+   ============================================================ */
+// The Filestack script is a separate CDN request, so it may not have parsed by
+// the time this component first renders. Retry briefly instead of permanently
+// deciding uploads are unavailable on the first paint.
+function useFilestack() {
+  const ref = useRef(null);
+  const [, bump] = useState(0);
+
+  useEffect(() => {
+    if (ref.current) return;
+    let tries = 0;
+    const t = setInterval(() => {
+      if (window.filestack && CFG.filestackApiKey &&
+          !CFG.filestackApiKey.startsWith("PASTE_")) {
+        try {
+          ref.current = window.filestack.init(CFG.filestackApiKey);
+          bump(n => n + 1);
+        } catch (e) { /* leave null; the picker reports it */ }
+        clearInterval(t);
+      } else if (++tries > 40) {          // ~10s
+        clearInterval(t);
+        bump(n => n + 1);
+      }
+    }, 250);
+    return () => clearInterval(t);
+  }, []);
+
+  return ref.current;
+}
+
+/* ============================================================
+   6. UI
+   ============================================================ */
+
+// Styling lifted from the original tracker so the finance view stays familiar.
+function StatCard({ label, value, sub, color, active, onClick }) {
+  return (
+    <button onClick={onClick}
+      className={"bg-white border rounded-xl p-4 text-left transition-all " +
+        (active ? "border-[#2a5f9e] shadow-sm bg-[#eaf1fb]" : "border-[#e0dbd3] hover:border-[#8c909a]")}>
+      <div className="text-[10px] text-[#8c909a] uppercase tracking-widest font-bold flex items-center gap-1.5 mb-2">
+        {color && <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: color }} />}
+        {label}
+      </div>
+      <div className="text-2xl font-bold tracking-tight"
+           style={{ color: active ? "#2a5f9e" : color || "inherit" }}>{value}</div>
+      <div className="text-[11px] text-[#8c909a] mt-1">{sub}</div>
+    </button>
+  );
+}
+
+function FilterGroup({ label, children }) {
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-[11px] font-semibold text-[#8c909a] uppercase tracking-wider">{label}</span>
+      {children}
+    </div>
+  );
+}
+
+function Badge({ status }) {
+  const styles = {
+    PENDING:  "bg-[#fef6e7] text-[#d97706]",
+    APPROVED: "bg-[#eaf1fb] text-[#2563eb]",
+    HOLD:     "bg-[#f3f0ff] text-[#7c3aed]",
+    DENIED:   "bg-[#fdeaea] text-[#dc2626]",
+    PAID:     "bg-[#e9f7f0] text-[#059669]"
+  };
+  return (
+    <span className={"rounded-full px-2 py-0.5 text-[11px] font-semibold " +
+                     (styles[status] || "bg-slate-100 text-slate-600")}>
+      {status === "APPROVED" ? "Ready to pay" : status.charAt(0) + status.slice(1).toLowerCase()}
+    </span>
+  );
+}
+
+function fmtAmt(n) {
+  return Number(n || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+// Stat cards + filter bar. Finance and admin only — an area coach has a handful
+// of invoices and doesn't need a filter rig over them.
+function FinanceDashboard({ invoices, stores, users, filters, setFilters }) {
+  const stats = useMemo(() => {
+    const counts = { PENDING: 0, APPROVED: 0, HOLD: 0, DENIED: 0, PAID: 0 };
+    let paidTotal = 0;
+    invoices.forEach(i => {
+      if (counts[i.status] !== undefined) counts[i.status]++;
+      if (i.status === "PAID") paidTotal += Number(i.amount) || 0;
+    });
+    return { counts, paidTotal, total: invoices.length };
+  }, [invoices]);
+
+  // Only approvers who actually appear on an invoice, so the list stays short.
+  const approvers = useMemo(() => {
+    const seen = new Map();
+    invoices.forEach(i => (i.requiredApprovals || []).forEach(s => {
+      (s.userIds || []).forEach(id => {
+        if (!seen.has(id)) seen.set(id, (users[id] && users[id].name) || s.name || id);
+      });
+    }));
+    return [...seen.entries()].sort((a, b) => a[1].localeCompare(b[1]));
+  }, [invoices, users]);
+
+  const set = (k, v) => setFilters(f => ({ ...f, [k]: v }));
+  const sel = "bg-[#faf9f7] border border-[#e0dbd3] rounded-md px-2 py-1 text-xs outline-none";
+  const active = filters.status || filters.division || filters.store || filters.approver || filters.q;
+
+  return (
+    <>
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mb-6">
+        <StatCard label="Total" value={stats.total} sub="All invoices"
+          active={!filters.status} onClick={() => set("status", "")} />
+        <StatCard label="Pending" value={stats.counts.PENDING} sub="Awaiting action" color="#d97706"
+          active={filters.status === "PENDING"} onClick={() => set("status", "PENDING")} />
+        <StatCard label="Approved" value={stats.counts.APPROVED} sub="Ready to pay" color="#2563eb"
+          active={filters.status === "APPROVED"} onClick={() => set("status", "APPROVED")} />
+        <StatCard label="On Hold" value={stats.counts.HOLD} sub="Needs review" color="#7c3aed"
+          active={filters.status === "HOLD"} onClick={() => set("status", "HOLD")} />
+        <StatCard label="Denied" value={stats.counts.DENIED} sub="Rejected" color="#dc2626"
+          active={filters.status === "DENIED"} onClick={() => set("status", "DENIED")} />
+        <StatCard label="Paid" value={stats.counts.PAID} sub={"$" + fmtAmt(stats.paidTotal) + " total"} color="#059669"
+          active={filters.status === "PAID"} onClick={() => set("status", "PAID")} />
+      </div>
+
+      <div className="bg-white border border-[#e0dbd3] rounded-xl p-3 mb-5 flex flex-wrap items-center gap-3">
+        <FilterGroup label="Status">
+          <select value={filters.status} onChange={e => set("status", e.target.value)} className={sel}>
+            <option value="">All</option>
+            <option value="PENDING">Pending</option>
+            <option value="APPROVED">Approved</option>
+            <option value="DENIED">Denied</option>
+            <option value="HOLD">Hold</option>
+            <option value="PAID">Paid</option>
+          </select>
+        </FilterGroup>
+
+        <div className="w-px h-4 bg-[#e0dbd3]" />
+        <FilterGroup label="Division">
+          <select value={filters.division} onChange={e => set("division", e.target.value)} className={sel}>
+            <option value="">All</option>
+            <option value="C-Store">C-Store</option>
+            <option value="Fast Food">Fast Food</option>
+            <option value="Car Wash">Car Wash</option>
+            <option value="Unknown">Unknown</option>
+          </select>
+        </FilterGroup>
+
+        <div className="w-px h-4 bg-[#e0dbd3]" />
+        <FilterGroup label="Store">
+          <select value={filters.store} onChange={e => set("store", e.target.value)}
+                  className={sel + " max-w-[160px]"}>
+            <option value="">All Stores</option>
+            {stores.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        </FilterGroup>
+
+        <div className="w-px h-4 bg-[#e0dbd3]" />
+        <FilterGroup label="Approver">
+          <select value={filters.approver} onChange={e => set("approver", e.target.value)}
+                  className={sel + " max-w-[150px]"}>
+            <option value="">Anyone</option>
+            {approvers.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
+          </select>
+        </FilterGroup>
+
+        <div className="w-px h-4 bg-[#e0dbd3]" />
+        <input value={filters.q} onChange={e => set("q", e.target.value)}
+               placeholder="Search vendor or invoice #…"
+               className={sel + " flex-1 min-w-[160px]"} />
+
+        {active && (
+          <button onClick={() => setFilters({ status: "", division: "", store: "", approver: "", q: "" })}
+                  className="text-xs font-medium text-[#2a5f9e] hover:underline">
+            Clear
+          </button>
+        )}
+      </div>
+    </>
+  );
+}
+
+function Pill({ tone, children, pulse }) {
+  const cls = tone === "late" ? "sla-late" : tone === "warn" ? "sla-warn" : "sla-ok";
+  return (
+    <span className={"inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium " +
+                     cls + (pulse ? " sla-late-pulse" : "")}>
+      {children}
+    </span>
+  );
+}
+
+function LateBanner({ invoices, now }) {
+  const late = invoices.filter(i => {
+    const s = slaState(i, now);
+    return s && s.level === "late";
+  });
+  if (!late.length) return null;
+  return (
+    <div className="mb-4 rounded-lg border border-red-300 bg-red-50 px-4 py-3">
+      <div className="flex items-center justify-between gap-4">
+        <div>
+          <p className="font-semibold text-red-800">
+            {late.length} invoice{late.length > 1 ? "s" : ""} past the {SLA_PHRASE} deadline
+          </p>
+          <p className="text-sm text-red-700">
+            {late.slice(0, 3).map(i => i.vendor + " ($" + Number(i.amount).toLocaleString() + ")").join(" · ")}
+            {late.length > 3 ? " and " + (late.length - 3) + " more" : ""}
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Login({ dir, onSignIn }) {
+  const [email, setEmail] = useState("");
+  const [pw, setPw]       = useState("");
+  const [err, setErr]     = useState("");
+  const [busy, setBusy]   = useState(false);
+
+  function submit(e) {
+    e && e.preventDefault();
+    setErr(""); setBusy(true);
+    const sess = resolveSession(email, pw, dir);
+    setBusy(false);
+    if (sess.error) { setErr(sess.error); return; }
+    onSignIn(sess, { email: sess.email, pw });
+  }
+
+  return (
+    <div className="flex min-h-screen items-center justify-center p-4">
+      <form onSubmit={submit}
+            className="w-full max-w-sm rounded-xl border bg-white p-6 shadow-sm">
+        <h1 className="text-lg font-semibold text-slate-900">AP Invoice Routing</h1>
+        <p className="mt-1 text-sm text-slate-500">
+          Sign in with your work email and your role password.
+        </p>
+
+        <label className="mt-5 block text-sm">
+          <span className="text-slate-600">Email</span>
+          <input type="email" value={email} autoComplete="username"
+                 onChange={e => setEmail(e.target.value)}
+                 placeholder="you@dossaniparadise.com"
+                 className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+        </label>
+
+        <label className="mt-3 block text-sm">
+          <span className="text-slate-600">Role password</span>
+          <input type="password" value={pw} autoComplete="current-password"
+                 onChange={e => setPw(e.target.value)}
+                 placeholder="••••••••"
+                 className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+        </label>
+
+        {err && (
+          <p className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{err}</p>
+        )}
+
+        <button type="submit" disabled={busy}
+          className="mt-4 w-full rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50">
+          {busy ? "Checking…" : "Sign in"}
+        </button>
+      </form>
+    </div>
+  );
+}
+
+function SimBanner({ session, onReturn }) {
+  return (
+    <div className="sticky top-0 z-20 mb-4 flex flex-wrap items-center justify-between gap-3
+                    rounded-lg border border-amber-400 bg-amber-100 px-4 py-2">
+      <div className="flex items-center gap-3">
+        <span className="rounded bg-amber-500 px-2 py-0.5 text-xs font-bold tracking-wide text-white">
+          VIEWING AS
+        </span>
+        <span className="text-sm text-amber-900">
+          <b>{session.name}</b>
+          <span className="ml-2 text-amber-700">{(session.role || "").replace("_", " ")}</span>
+        </span>
+      </div>
+      <button onClick={onReturn}
+        className="rounded-lg bg-amber-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-700">
+        ↩ Return to my account
+      </button>
+    </div>
+  );
+}
+
+function ViewAsModal({ dir, onPick, onClose }) {
+  const [q, setQ] = useState("");
+  const roster = useMemo(() => viewAsRoster(dir), [dir]);
+  const shown = useMemo(() => {
+    const t = q.toLowerCase().trim();
+    return t ? roster.filter(r => r.search.includes(t)) : roster;
+  }, [q, roster]);
+
+  return (
+    <div className="fixed inset-0 z-30 flex items-start justify-center bg-black/40 p-4 pt-16"
+         onClick={onClose}>
+      <div className="w-full max-w-md rounded-xl bg-white shadow-lg"
+           onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between border-b px-4 py-3">
+          <h2 className="font-semibold text-slate-900">View as…</h2>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600">✕</button>
+        </div>
+        <div className="p-4">
+          <input autoFocus value={q} onChange={e => setQ(e.target.value)}
+                 placeholder="Search name, store #, or role…"
+                 className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+          <div className="mt-3 max-h-80 space-y-1 overflow-y-auto">
+            {shown.length === 0 && (
+              <p className="py-6 text-center text-sm text-slate-400">No matches.</p>
+            )}
+            {shown.map(r => (
+              <button key={r.kind + ":" + r.id} onClick={() => onPick(r)}
+                className="block w-full rounded-lg px-3 py-2 text-left hover:bg-slate-50">
+                <span className="block text-sm font-medium text-slate-900">{r.primary}</span>
+                {r.secondary && (
+                  <span className="block text-xs text-slate-500">{r.secondary}</span>
+                )}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function NewInvoice({ stores, users, currentUser, onDone }) {
+  const fs = useFilestack();
+  const [storeId, setStoreId] = useState("");
+  const [vendor, setVendor]   = useState("");
+  const [amount, setAmount]   = useState("");
+  const [invoiceNumber, setInvoiceNumber] = useState("");
+  const [file, setFile]       = useState(null);
+  const [busy, setBusy]       = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [err, setErr]         = useState("");
+
+  const store = stores.find(s => s.id === storeId);
+  const amt   = parseFloat(amount) || 0;
+  const chain = store ? buildApprovalChain(store, amt, users) : [];
+
+  function pickFile() {
+    setErr("");
+    if (!fs) {
+      setErr("Upload isn't available — the Filestack script didn't load. Check the network or the API key.");
+      return;
+    }
+    setUploading(true);
+    fs.picker({
+      accept: ["application/pdf", "image/*"],
+      maxFiles: 1,
+      fromSources: ["local_file_system", "googledrive", "dropbox", "onedrive"],
+      // Files land under the store so invoices stay traceable in Filestack.
+      storeTo: { path: "/invoices/" + (store ? store.storeNumber || store.id : "unfiled") + "/" },
+      onUploadDone: r => {
+        setUploading(false);
+        const f = r.filesUploaded && r.filesUploaded[0];
+        if (f) setFile({ url: f.url, name: f.filename, handle: f.handle, size: f.size });
+        else setErr("Nothing was uploaded. Try again.");
+      },
+      onFileUploadFailed: (f, e) => {
+        setUploading(false);
+        setErr("Upload failed: " + ((e && e.message) || "unknown error"));
+      },
+      onClose: () => setUploading(false)
+    }).open();
+  }
+
+  async function submit() {
+    setErr("");
+    if (!store)        return setErr("Pick a store.");
+    if (!vendor.trim())return setErr("Enter a vendor.");
+    if (!(amt > 0))    return setErr("Enter an amount.");
+    if (!chain.length) return setErr("No approvers found for this store — check the directory.");
+
+    setBusy(true);
+    try {
+      const now = Date.now();
+      await invoiceService.create({
+        vendor: vendor.trim(),
+        amount: amt,
+        invoiceNumber: invoiceNumber.trim(),
+        storeId: store.id,
+        storeName: store.name,
+        division: store.division,
+        status: "PENDING",
+        currentStage: chain[0].role,
+        requiredApprovals: chain,
+        history: [],
+        fileUrl: file ? file.url : null,
+        fileName: file ? file.name : null,
+        createdAt: now,
+        updatedAt: now,
+        stageEnteredAt: now,          // starts the 48h clock
+        createdBy: currentUser.id,
+        createdByName: currentUser.name
+      });
+      setVendor(""); setAmount(""); setInvoiceNumber(""); setFile(null); setStoreId("");
+      onDone && onDone();
+    } catch (e) {
+      setErr(e.message || "Could not save.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="rounded-xl border bg-white p-5 shadow-sm">
+      <h2 className="text-sm font-semibold text-slate-900">New invoice</h2>
+
+      <div className="mt-4 grid gap-3 sm:grid-cols-2">
+        <label className="text-sm">
+          <span className="text-slate-600">Store</span>
+          <select value={storeId} onChange={e => setStoreId(e.target.value)}
+            className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm">
+            <option value="">Select a store…</option>
+            {stores.map(s => (
+              <option key={s.id} value={s.id}>{s.name}</option>
+            ))}
+          </select>
+        </label>
+
+        <label className="text-sm">
+          <span className="text-slate-600">Vendor</span>
+          <input value={vendor} onChange={e => setVendor(e.target.value)}
+            className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+        </label>
+
+        <label className="text-sm">
+          <span className="text-slate-600">Amount (USD)</span>
+          <input value={amount} onChange={e => setAmount(e.target.value)}
+            inputMode="decimal" placeholder="0.00"
+            className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+        </label>
+
+        <label className="text-sm">
+          <span className="text-slate-600">Invoice #</span>
+          <input value={invoiceNumber} onChange={e => setInvoiceNumber(e.target.value)}
+            className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+        </label>
+      </div>
+
+      <div className="mt-3 flex flex-wrap items-center gap-3">
+        <button type="button" onClick={pickFile} disabled={uploading || !fs}
+          className="rounded-lg border border-slate-300 px-3 py-2 text-sm hover:bg-slate-50 disabled:opacity-50">
+          {uploading ? "Uploading…" : file ? "Replace file" : "Attach invoice PDF"}
+        </button>
+
+        {file && (
+          <span className="flex min-w-0 items-center gap-2 rounded-lg bg-emerald-50 px-3 py-1.5">
+            <span className="truncate text-sm text-emerald-800">{file.name}</span>
+            {file.size ? (
+              <span className="shrink-0 text-xs text-emerald-600">
+                {(file.size / 1024).toFixed(0)} KB
+              </span>
+            ) : null}
+            <button type="button" onClick={() => setFile(null)}
+              className="shrink-0 text-emerald-700 hover:text-emerald-900" title="Remove">✕</button>
+          </span>
+        )}
+
+        {!fs && !uploading && (
+          <span className="text-xs text-slate-400">Upload unavailable</span>
+        )}
+      </div>
+
+      {store && (
+        <div className="mt-4 rounded-lg bg-slate-50 p-3">
+          <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
+            Routes to · {store.division}
+          </p>
+          {chain.length ? (
+            <ol className="mt-2 space-y-1">
+              {chain.map((s, i) => (
+                <li key={i} className="text-sm text-slate-700">
+                  <span className="font-medium">{i + 1}. {s.label}</span> — {s.name}
+                  {s.note && <span className="ml-1 text-xs text-slate-500">({s.note})</span>}
+                </li>
+              ))}
+            </ol>
+          ) : (
+            <p className="mt-2 text-sm text-red-700">No approvers found for this store.</p>
+          )}
+        </div>
+      )}
+
+      {err && <p className="mt-3 text-sm text-red-700">{err}</p>}
+
+      <button onClick={submit} disabled={busy}
+        className="mt-4 rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50">
+        {busy ? "Saving…" : "Send for approval"}
+      </button>
+    </div>
+  );
+}
+
+function CommentThread({ invoiceId, currentUser, canPost }) {
+  const [items, setItems] = useState(null);
+  const [text, setText]   = useState("");
+  const [busy, setBusy]   = useState(false);
+  const [err, setErr]     = useState("");
+
+  useEffect(() => {
+    if (!window.FS) return;
+    const unsub = commentService.subscribe(invoiceId, setItems,
+      e => setErr(e.message || "Couldn't load comments."));
+    return () => unsub && unsub();
+  }, [invoiceId]);
+
+  async function post() {
+    const t = text.trim();
+    if (!t) return;
+    setBusy(true); setErr("");
+    try {
+      await commentService.add(invoiceId, currentUser, t);
+      setText("");
+    } catch (e) {
+      setErr(e.message || "Couldn't post.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="mt-3 border-t pt-3">
+      <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
+        Discussion{items && items.length ? " (" + items.length + ")" : ""}
+      </p>
+
+      {items === null && <p className="mt-2 text-sm text-slate-400">Loading…</p>}
+      {items && items.length === 0 && (
+        <p className="mt-2 text-sm text-slate-400">No comments yet.</p>
+      )}
+
+      {items && items.length > 0 && (
+        <ul className="mt-2 space-y-2">
+          {items.map(c => {
+            const me = c.userId === currentUser.id;
+            return (
+              <li key={c.id}
+                  className={"rounded-lg px-3 py-2 " + (me ? "bg-sky-50" : "bg-slate-50")}>
+                <div className="flex flex-wrap items-baseline gap-2">
+                  <span className="text-sm font-medium text-slate-800">{c.userName}</span>
+                  <span className="text-xs text-slate-400">
+                    {(c.userRole || "").replace("_", " ")} · {new Date(c.ts).toLocaleString()}
+                  </span>
+                </div>
+                <p className="mt-0.5 whitespace-pre-wrap text-sm text-slate-700">{c.text}</p>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+
+      {err && <p className="mt-2 text-sm text-red-700">{err}</p>}
+
+      {canPost ? (
+        <div className="mt-2 flex gap-2">
+          <input value={text} onChange={e => setText(e.target.value)}
+                 onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); post(); } }}
+                 placeholder="Ask a question or add context…"
+                 className="flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+          <button onClick={post} disabled={busy || !text.trim()}
+            className="rounded-lg bg-slate-900 px-3 py-2 text-sm font-medium text-white disabled:opacity-40">
+            {busy ? "…" : "Post"}
+          </button>
+        </div>
+      ) : (
+        <p className="mt-2 text-xs text-slate-400">
+          Return to your own account to post.
+        </p>
+      )}
+
+      <p className="mt-2 text-xs text-slate-400">
+        Comments don't pause the approval clock.
+      </p>
+    </div>
+  );
+}
+
+function InvoiceRow({ inv, users, currentUser, now, onAct, canFinance }) {
+  const [note, setNote] = useState("");
+  const [open, setOpen] = useState(false);
+  const sla  = slaState(inv, now);
+  const mine = canUserAct(currentUser, inv);
+  const step = (inv.requiredApprovals || []).find(s => s.role === inv.currentStage);
+
+  return (
+    <div className="rounded-xl border bg-white p-4 shadow-sm">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="font-medium text-slate-900">{inv.vendor}</p>
+            <span className="text-sm text-slate-500">
+              ${Number(inv.amount).toLocaleString(undefined, { minimumFractionDigits: 2 })}
+            </span>
+            {inv.status === "PENDING" && sla && (
+              <span title={slaTitle(sla)}>
+                <Pill tone={sla.level} pulse={sla.level === "late"}>
+                  {slaLabel(sla)}{sla.paused ? " ⏸" : ""}
+                </Pill>
+              </span>
+            )}
+            <Badge status={inv.status} />
+          </div>
+          <p className="mt-1 truncate text-sm text-slate-500">
+            {inv.storeName}{inv.invoiceNumber ? " · #" + inv.invoiceNumber : ""}
+          </p>
+          {inv.status === "PENDING" && step && (
+            <p className="mt-1 text-sm text-slate-600">
+              Waiting on <span className="font-medium">{step.label}</span> — {step.name}
+            </p>
+          )}
+        </div>
+
+        <div className="flex items-center gap-2">
+          {inv.fileUrl && (
+            <a href={inv.fileUrl} target="_blank" rel="noopener noreferrer"
+               className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-50">
+              View PDF
+            </a>
+          )}
+          <button onClick={() => setOpen(o => !o)}
+            className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-50">
+            {open ? "Hide" : "Details"}
+          </button>
+        </div>
+      </div>
+
+      {mine && (
+        <div className="mt-3 rounded-lg bg-slate-50 p-3">
+          <input value={note} onChange={e => setNote(e.target.value)}
+            placeholder="Add a note (optional)"
+            className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button onClick={() => onAct(inv, "APPROVE", note)}
+              className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700">
+              Approve
+            </button>
+            <button onClick={() => onAct(inv, "HOLD", note)}
+              className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-700">
+              Hold
+            </button>
+            <button onClick={() => onAct(inv, "REJECT", note)}
+              className="rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700">
+              Reject
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* A held invoice is stuck until someone puts it back in the queue. */}
+      {inv.status === "HOLD" && canFinance && (
+        <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg bg-violet-50 p-3">
+          <span className="text-sm text-violet-800">On hold — needs review.</span>
+          <button onClick={() => onAct(inv, "RESUME", "")}
+            className="rounded-lg bg-violet-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-violet-700">
+            Release back to {inv.currentStage === "AREA_COACH" ? "Area Coach" :
+                              inv.currentStage === "DIRECTOR" ? "Director" : "VP"}
+          </button>
+        </div>
+      )}
+
+      {/* Only finance closes the loop by marking an approved invoice paid. */}
+      {inv.status === "APPROVED" && canFinance && (
+        <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg bg-emerald-50 p-3">
+          <span className="text-sm text-emerald-800">Fully approved — ready for payment.</span>
+          <button onClick={() => onAct(inv, "PAID", "")}
+            className="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-700">
+            Mark as paid
+          </button>
+        </div>
+      )}
+
+      {open && (
+        <div className="mt-3 border-t pt-3">
+          <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Approval chain</p>
+          <ol className="mt-2 space-y-1">
+            {(inv.requiredApprovals || []).map((s, i) => {
+              const done = (inv.history || []).some(h => h.stage === s.role && h.action === "APPROVE");
+              const cur  = inv.currentStage === s.role && inv.status === "PENDING";
+              return (
+                <li key={i} className="text-sm">
+                  <span className={done ? "text-emerald-700" : cur ? "font-medium text-slate-900" : "text-slate-500"}>
+                    {done ? "✓" : cur ? "→" : "•"} {s.label} — {s.name}
+                  </span>
+                </li>
+              );
+            })}
+          </ol>
+
+          {(inv.history || []).length > 0 && (
+            <>
+              <p className="mt-3 text-xs font-medium uppercase tracking-wide text-slate-500">History</p>
+              <ul className="mt-2 space-y-1">
+                {inv.history.map((h, i) => (
+                  <li key={i} className="text-sm text-slate-600">
+                    <span className="font-medium">{h.byName}</span>{" "}
+                    {({ APPROVE: "approved", REJECT: "denied", HOLD: "put on hold",
+                        RESUME: "released the hold", PAID: "marked paid" })[h.action] || h.action}{" "}
+                    <span className="text-slate-400">
+                      · {new Date(h.ts).toLocaleString()}
+                    </span>
+                    {h.note && <span className="block text-slate-500">“{h.note}”</span>}
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+
+          <CommentThread invoiceId={inv.id} currentUser={currentUser}
+                         canPost={!currentUser._sim} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SettingsPanel() {
+  const dash = "https://dev.filestack.com/apps/" + CFG.filestackApiKey + "/usage";
+  return (
+    <div className="space-y-4">
+      <div className="rounded-xl border bg-white p-5 shadow-sm">
+        <h2 className="text-sm font-semibold text-slate-900">File storage — Filestack</h2>
+        <p className="mt-1 text-sm text-slate-500">
+          Invoice PDFs are stored in Filestack. Upload counts, storage, and delivery
+          quotas live in the Filestack dashboard.
+        </p>
+
+        <dl className="mt-4 grid gap-2 text-sm sm:grid-cols-2">
+          <div className="flex justify-between rounded-lg bg-slate-50 px-3 py-2">
+            <dt className="text-slate-500">App key</dt>
+            <dd className="font-mono text-slate-700">{CFG.filestackApiKey}</dd>
+          </div>
+          <div className="flex justify-between rounded-lg bg-slate-50 px-3 py-2">
+            <dt className="text-slate-500">Upload path</dt>
+            <dd className="font-mono text-slate-700">/invoices/&lt;store#&gt;/</dd>
+          </div>
+        </dl>
+
+        <a href={dash} target="_blank" rel="noopener noreferrer"
+           className="mt-4 inline-flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2
+                      text-sm font-medium text-white hover:bg-slate-800">
+          Open Filestack dashboard ↗
+        </a>
+        <p className="mt-2 text-xs text-slate-400">
+          Opens Filestack in a new tab. You'll need to be signed in to the Filestack account.
+          Live usage bars (uploads, storage, delivery) are shown there.
+        </p>
+      </div>
+
+      <div className="rounded-xl border bg-white p-5 shadow-sm">
+        <h2 className="text-sm font-semibold text-slate-900">Approval rules</h2>
+        <p className="mt-1 text-sm text-slate-500">Current routing configuration.</p>
+        <dl className="mt-3 grid gap-2 text-sm sm:grid-cols-2">
+          <div className="flex justify-between rounded-lg bg-slate-50 px-3 py-2">
+            <dt className="text-slate-500">VP threshold</dt>
+            <dd className="text-slate-700">${CFG.vpThreshold.toLocaleString()}+</dd>
+          </div>
+          <div className="flex justify-between rounded-lg bg-slate-50 px-3 py-2">
+            <dt className="text-slate-500">Turnaround target</dt>
+            <dd className="text-slate-700">{SLA_PHRASE}</dd>
+          </div>
+          <div className="flex justify-between rounded-lg bg-slate-50 px-3 py-2">
+            <dt className="text-slate-500">Business hours</dt>
+            <dd className="text-slate-700">Mon–Fri {BH.startHour}:00–{BH.endHour}:00</dd>
+          </div>
+          <div className="flex justify-between rounded-lg bg-slate-50 px-3 py-2">
+            <dt className="text-slate-500">VP</dt>
+            <dd className="text-slate-700">{CFG.vp.name}</dd>
+          </div>
+        </dl>
+      </div>
+    </div>
+  );
+}
+
+function App() {
+  const [ready, setReady]       = useState(false);
+  const [dir, setDir]           = useState({ users: {}, stores: [] });
+  const [session, setSession]   = useState(null);
+  const [realSession, setReal]  = useState(null);   // admin's true session while impersonating
+  const [showViewAs, setShowVA] = useState(false);
+  const [invoices, setInvoices] = useState([]);
+  const [tab, setTab]           = useState("inbox");
+  const [err, setErr]           = useState("");
+  const [now, setNow]           = useState(Date.now());
+  const [filters, setFilters]   = useState({ status: "", division: "", store: "", approver: "", q: "" });
+
+  // Directory load, then silently restore a saved session against the LIVE
+  // directory so a person removed upstream loses access on next load.
+  useEffect(() => {
+    directoryService.load()
+      .then(d => {
+        setDir(d); setReady(true);
+        try {
+          const saved = JSON.parse(localStorage.getItem("ap_session") || "null");
+          if (saved && saved.email && saved.pw) {
+            const s = resolveSession(saved.email, saved.pw, d);
+            if (!s.error) setSession(s);
+            else localStorage.removeItem("ap_session");
+          }
+        } catch (e) { /* ignore malformed */ }
+      })
+      .catch(e => { setErr("Directory: " + e.message); setReady(true); });
+  }, []);
+
+  useEffect(() => {
+    let unsub;
+    function start() {
+      unsub = invoiceService.subscribe(setInvoices, e => setErr("Firestore: " + e.message));
+    }
+    if (window.FS) start();
+    else window.addEventListener("firebase-ready", start, { once: true });
+    return () => unsub && unsub();
+  }, []);
+
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 60000);
+    return () => clearInterval(t);
+  }, []);
+
+  function signIn(sess, creds) {
+    setSession(sess);
+    try { localStorage.setItem("ap_session", JSON.stringify(creds)); } catch (e) {}
+  }
+
+  function signOut() {
+    setSession(null); setReal(null);
+    try { localStorage.removeItem("ap_session"); } catch (e) {}
+  }
+
+  function startViewAs(row) {
+    const sim = buildImpersonatedSession(row, dir);
+    if (!sim) { setErr("Couldn't load that view."); return; }
+    if (!realSession) setReal(session);   // remember the real admin session once
+    setSession(sim);
+    setShowVA(false);
+    setTab("inbox");
+  }
+
+  function returnToMyAccount() {
+    if (!realSession) return;
+    setSession(realSession);
+    setReal(null);
+    setTab("inbox");
+  }
+
+  // --- Derived values -------------------------------------------------------
+  // These must be computed BEFORE any early return. React requires the same
+  // number of hooks on every render, so a useMemo placed after the loading/login
+  // returns would run only once a session exists and crash with error #310.
+  const isAdmin   = !!session && session.role === "ADMIN";
+  const isFinance = !!session && session.role === "FINANCE";
+  const canSeeAll = isAdmin || isFinance;
+
+  // Finance and admin see everything; everyone else sees only what touches them.
+  const visible = useMemo(() => {
+    if (!session) return [];
+    if (canSeeAll) return invoices;
+    return invoices.filter(i =>
+      (i.requiredApprovals || []).some(s => (s.userIds || []).includes(session.id)) ||
+      i.createdBy === session.id ||
+      (session.storeId && i.storeId === session.storeId));
+  }, [invoices, session, canSeeAll]);
+
+  // Filters apply to the finance/admin dashboard only.
+  const filtered = useMemo(() => {
+    if (!canSeeAll) return visible;
+    const q = (filters.q || "").trim().toLowerCase();
+    return visible.filter(i => {
+      if (filters.status && i.status !== filters.status) return false;
+      if (filters.division && i.division !== filters.division) return false;
+      if (filters.store && i.storeId !== filters.store) return false;
+      if (filters.approver && !(i.requiredApprovals || [])
+            .some(s => (s.userIds || []).includes(filters.approver))) return false;
+      if (q && !((i.vendor || "").toLowerCase().includes(q) ||
+                 (i.invoiceNumber || "").toLowerCase().includes(q) ||
+                 (i.storeName || "").toLowerCase().includes(q))) return false;
+      return true;
+    });
+  }, [visible, filters, canSeeAll]);
+
+  // --- Early returns (no hooks may appear below this line) ------------------
+  if (!ready)   return <p className="p-8 text-slate-500">Loading directory…</p>;
+  if (!session) return <Login dir={dir} onSignIn={signIn} />;
+
+  const mine    = visible.filter(i => canUserAct(session, i));
+  const pending = visible.filter(i => i.status === "PENDING");
+  const done    = visible.filter(i => i.status !== "PENDING");
+
+  const shown = canSeeAll
+    ? (tab === "inbox" ? filtered.filter(i => canUserAct(session, i)) : filtered)
+    : (tab === "inbox" ? mine : tab === "pending" ? pending : done);
+
+  // Only Finance/AP and admin raise invoices.
+  const canCreate = canSeeAll;
+
+  return (
+    <div className="mx-auto max-w-4xl p-4 sm:p-6">
+      {session._sim && <SimBanner session={session} onReturn={returnToMyAccount} />}
+
+      <header className="mb-5 flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h1 className="text-lg font-semibold text-slate-900">AP Invoice Routing</h1>
+          <p className="text-sm text-slate-500">
+            {session.name} · {(session.role || "").replace("_", " ")}
+          </p>
+        </div>
+        <div className="flex gap-2">
+          {(isAdmin || (realSession && realSession.role === "ADMIN")) && !session._sim && (
+            <button onClick={() => setShowVA(true)}
+              className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-50">
+              View as…
+            </button>
+          )}
+          <button onClick={signOut}
+            className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-50">
+            Sign out
+          </button>
+        </div>
+      </header>
+
+      {showViewAs && (
+        <ViewAsModal dir={dir} onPick={startViewAs} onClose={() => setShowVA(false)} />
+      )}
+
+      {err && (
+        <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50 px-4 py-2 text-sm text-amber-800">
+          {err}
+        </div>
+      )}
+
+      <LateBanner invoices={pending} now={now} />
+
+      {canSeeAll && (
+        <FinanceDashboard invoices={visible} stores={dir.stores} users={dir.users}
+                          filters={filters} setFilters={setFilters} />
+      )}
+
+      {canCreate && !session._sim && (
+        <div className="mb-4">
+          <NewInvoice stores={dir.stores} users={dir.users} currentUser={session} />
+        </div>
+      )}
+
+      {/* Finance gets two views; approvers get the simpler three-tab split.
+          Finance and admin also get a Settings tab. */}
+      <nav className="mb-3 flex gap-1 rounded-lg bg-slate-200 p-1 text-sm">
+        {(canSeeAll
+          ? [["inbox", "Needs me (" + mine.length + ")"],
+             ["all",   "All invoices (" + filtered.length + ")"],
+             ["settings", "Settings"]]
+          : [["inbox",   "Needs me (" + mine.length + ")"],
+             ["pending", "All pending (" + pending.length + ")"],
+             ["done",    "Closed (" + done.length + ")"]]
+        ).map(([k, label]) => (
+          <button key={k} onClick={() => setTab(k)}
+            className={"flex-1 rounded-md px-3 py-1.5 font-medium " +
+              (tab === k ? "bg-white text-slate-900 shadow-sm" : "text-slate-600")}>
+            {label}
+          </button>
+        ))}
+      </nav>
+
+      {tab === "settings" && canSeeAll ? (
+        <SettingsPanel />
+      ) : (
+      <div className="space-y-3">
+        {shown.length === 0 && (
+          <p className="rounded-xl border border-dashed bg-white p-8 text-center text-sm text-slate-500">
+            {tab === "inbox" ? "Nothing waiting on you." : "No invoices match these filters."}
+          </p>
+        )}
+        {shown.map(inv => (
+          <InvoiceRow key={inv.id} inv={inv} users={dir.users} currentUser={session}
+                      now={now} onAct={act} canFinance={canSeeAll && !session._sim} />
+        ))}
+      </div>
+      )}
+    </div>
+  );
+
+  async function act(inv, action, note) {
+    // An impersonated session must never write — it is a view, not a login.
+    if (session._sim) { setErr("You're viewing as someone else. Return to your account to act."); return; }
+    const ts = Date.now();
+    const entry = { stage: inv.currentStage, by: session.id, byName: session.name,
+                    action, note: note || "", ts };
+    const history = [...(inv.history || []), entry];
+
+    if (action === "REJECT") {
+      await invoiceService.update(inv.id, {
+        status: "DENIED", history, updatedAt: ts, stageEnteredAt: null
+      });
+      return;
+    }
+
+    // Hold parks the invoice at its current stage and stops the SLA clock, so
+    // an invoice waiting on a vendor question doesn't accrue overdue hours.
+    if (action === "HOLD") {
+      await invoiceService.update(inv.id, {
+        status: "HOLD", history, updatedAt: ts, stageEnteredAt: null
+      });
+      return;
+    }
+
+    // Releasing a hold restarts the clock for whoever it was parked on.
+    if (action === "RESUME") {
+      await invoiceService.update(inv.id, {
+        status: "PENDING", history, updatedAt: ts, stageEnteredAt: ts
+      });
+      return;
+    }
+
+    if (action === "PAID") {
+      await invoiceService.update(inv.id, {
+        status: "PAID", currentStage: "PAID", history, updatedAt: ts,
+        paidAt: ts, stageEnteredAt: null
+      });
+      return;
+    }
+
+    const chain = inv.requiredApprovals || [];
+    const idx   = chain.findIndex(s => s.role === inv.currentStage);
+    const next  = chain[idx + 1];
+
+    await invoiceService.update(inv.id, next
+      ? { currentStage: next.role, history, updatedAt: ts, stageEnteredAt: ts }  // clock resets
+      : { status: "APPROVED", currentStage: "APPROVED", history, updatedAt: ts, stageEnteredAt: null });
+  }
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
