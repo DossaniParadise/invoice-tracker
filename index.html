@@ -29,6 +29,8 @@
      ============================================================ -->
 <script>
 window.APP_CONFIG = {
+  // Shown in the footer for all users. Increment on every update.
+  version: "1.2",
   // Firestore
   firebase: {
     apiKey: "AIzaSyAxW6wajL9PH1Wlw3_QuBXgAMFgYWjkJp8",
@@ -202,6 +204,7 @@ const directoryService = {
       directorId: r.assignedDirectorId || null,
       storeManager: r.storeManager || "",
       email: r.email || "",          // store mailbox — managers sign in with this
+      entity: r.entity || "",        // legal entity, e.g. "Al's Quick Stop Inc."
       address: r.address || ""
     })).sort((a, b) => a.name.localeCompare(b.name));
 
@@ -210,65 +213,124 @@ const directoryService = {
 };
 
 /* ============================================================
-   2. APPROVAL CHAIN
-   AC -> DO, plus VP when amount >= threshold.
-   No AC on the store  -> starts at DO.
-   Multiple ACs        -> any one of them can approve (userIds).
-   Director is the VP  -> skip the duplicate VP step.
+   2. APPROVAL CHAINS — one INDEPENDENT chain per store.
+
+   A 4-store invoice carries 4 chains. Each chain runs its own
+   AC -> DO (-> VP) sequence with its own status, current stage,
+   SLA clock, and history. One chain rejecting does not touch the
+   others: 3 of 4 stores can approve while the 4th rejects, and
+   Finance processes payment for the approved subset.
+
+   Within a step, ANY listed user may approve (two-coach stores).
+   The VP threshold applies to the invoice TOTAL, and when it
+   triggers, the VP step appears in EVERY chain — so the VP can
+   approve some stores and reject others.
    ============================================================ */
-function buildApprovalChain(store, amount, users) {
+
+// Steps for ONE store. Identical to the original single-store rules.
+function buildStoreChainSteps(store, amount, users) {
   const steps = [];
   const nameOf = id => (users[id] && users[id].name) || "Unknown";
 
   const acIds = (store.acIds || []).filter(id => users[id]);
   if (acIds.length) {
     steps.push({
-      role: "AREA_COACH",
-      label: "Area Coach / DM",
-      userIds: acIds,
-      userId: acIds[0],
+      role: "AREA_COACH", label: "Area Coach / DM",
+      userIds: acIds, userId: acIds[0],
       name: acIds.map(nameOf).join(" or ")
     });
   }
 
   if (store.directorId && users[store.directorId]) {
     steps.push({
-      role: "DIRECTOR",
-      label: "Director of Ops",
-      userIds: [store.directorId],
-      userId: store.directorId,
+      role: "DIRECTOR", label: "Director of Ops",
+      userIds: [store.directorId], userId: store.directorId,
       name: nameOf(store.directorId),
-      note: acIds.length ? undefined : "No Area Coach on this store — starts here"
+      note: acIds.length ? undefined : "No Area Coach — starts here"
     });
   }
 
   if (amount >= CFG.vpThreshold) {
-    // Sam is the assigned DIRECTOR for C-Store/car wash stores, under a
-    // different id than the VP entry. Compare against every id we know maps to
-    // him, or a $3,000 Quick Stop invoice routes "Sam -> Sam".
+    // Sam is also the assigned DIRECTOR for C-Store/car wash stores under a
+    // different id; skip the duplicate VP step in THIS chain when he already
+    // appears in it.
     const vpIds = [CFG.vp.id, CFG.vp.directoryId].filter(Boolean);
-    const alreadySigned = steps.some(s => s.userIds.some(id => vpIds.includes(id)));
-    if (!alreadySigned) {
+    const already = steps.some(s => s.userIds.some(id => vpIds.includes(id)));
+    if (!already) {
       steps.push({
-        role: "VP",
-        label: "VP of Ops",
-        userIds: [CFG.vp.id],
-        userId: CFG.vp.id,
-        name: CFG.vp.name,
-        note: "Invoices $" + CFG.vpThreshold.toLocaleString() + "+"
+        role: "VP", label: "VP of Ops",
+        userIds: [CFG.vp.id], userId: CFG.vp.id, name: CFG.vp.name,
+        note: "Invoice total $" + CFG.vpThreshold.toLocaleString() + "+"
       });
     }
   }
-
   return steps;
 }
 
-function canUserAct(user, inv) {
-  if (!user || !inv) return false;
-  if (inv.status !== "PENDING") return false;
-  const step = (inv.requiredApprovals || []).find(s => s.role === inv.currentStage);
+// Full chain objects for an invoice.
+function buildChains(stores, amount, users, now) {
+  return stores.map(st => {
+    const steps = buildStoreChainSteps(st, amount, users);
+    return {
+      storeId: st.id,
+      storeName: st.name,
+      storeNumber: st.storeNumber || "",
+      entity: st.entity || "",
+      division: st.division || "",
+      steps,
+      status: steps.length ? "PENDING" : "REJECTED",   // unroutable store fails loudly
+      currentStage: steps.length ? steps[0].role : "NONE",
+      stageEnteredAt: steps.length ? now : null,
+      history: []
+    };
+  });
+}
+
+// Normalized chains for ANY invoice. Legacy single-chain invoices (top-level
+// requiredApprovals) are presented as one synthetic chain so old records
+// render and route without migration.
+function getChains(inv) {
+  if (Array.isArray(inv.chains) && inv.chains.length) return inv.chains;
+  if (Array.isArray(inv.requiredApprovals) && inv.requiredApprovals.length) {
+    return [{
+      _legacy: true,
+      storeId: inv.storeId || "", storeName: inv.storeName || "",
+      storeNumber: "", entity: "", division: inv.division || "",
+      steps: inv.requiredApprovals,
+      status: inv.status === "PAID" ? "APPROVED" : inv.status,
+      currentStage: inv.currentStage,
+      stageEnteredAt: inv.stageEnteredAt || null,
+      history: inv.history || []
+    }];
+  }
+  return [];
+}
+
+// Top-level invoice status derived from its chains.
+//   any chain PENDING or HOLD  -> PENDING (still in flight)
+//   otherwise ≥1 APPROVED      -> APPROVED (finance pays that subset)
+//   otherwise                  -> REJECTED
+function deriveStatus(chains) {
+  if (chains.some(c => c.status === "PENDING" || c.status === "HOLD")) return "PENDING";
+  return chains.some(c => c.status === "APPROVED") ? "APPROVED" : "REJECTED";
+}
+
+function chainCurrentStep(chain) {
+  return (chain.steps || []).find(s => s.role === chain.currentStage) || null;
+}
+
+function canActOnChain(user, chain) {
+  if (!user || !chain) return false;
+  if (chain.status !== "PENDING") return false;
+  const step = chainCurrentStep(chain);
   if (!step) return false;
   return (step.userIds || [step.userId]).includes(user.id);
+}
+
+// True when the user can act on at least one chain of the invoice.
+function canUserAct(user, inv) {
+  if (!inv || inv.status === "PAID") return false;
+  return getChains(inv).some(c => canActOnChain(user, c));
 }
 
 /* ============================================================
@@ -611,7 +673,7 @@ function Badge({ status }) {
     PENDING:  "bg-[#fef6e7] text-[#d97706]",
     APPROVED: "bg-[#eaf1fb] text-[#2563eb]",
     HOLD:     "bg-[#f3f0ff] text-[#7c3aed]",
-    DENIED:   "bg-[#fdeaea] text-[#dc2626]",
+    REJECTED: "bg-[#fdeaea] text-[#dc2626]",
     PAID:     "bg-[#e9f7f0] text-[#059669]"
   };
   return (
@@ -630,7 +692,7 @@ function fmtAmt(n) {
 // of invoices and doesn't need a filter rig over them.
 function FinanceDashboard({ invoices, stores, users, filters, setFilters }) {
   const stats = useMemo(() => {
-    const counts = { PENDING: 0, APPROVED: 0, HOLD: 0, DENIED: 0, PAID: 0 };
+    const counts = { PENDING: 0, APPROVED: 0, HOLD: 0, REJECTED: 0, PAID: 0 };
     let paidTotal = 0;
     invoices.forEach(i => {
       if (counts[i.status] !== undefined) counts[i.status]++;
@@ -642,11 +704,11 @@ function FinanceDashboard({ invoices, stores, users, filters, setFilters }) {
   // Only approvers who actually appear on an invoice, so the list stays short.
   const approvers = useMemo(() => {
     const seen = new Map();
-    invoices.forEach(i => (i.requiredApprovals || []).forEach(s => {
+    invoices.forEach(i => getChains(i).forEach(c => (c.steps || []).forEach(s => {
       (s.userIds || []).forEach(id => {
         if (!seen.has(id)) seen.set(id, (users[id] && users[id].name) || s.name || id);
       });
-    }));
+    })));
     return [...seen.entries()].sort((a, b) => a[1].localeCompare(b[1]));
   }, [invoices, users]);
 
@@ -665,8 +727,8 @@ function FinanceDashboard({ invoices, stores, users, filters, setFilters }) {
           active={filters.status === "APPROVED"} onClick={() => set("status", "APPROVED")} />
         <StatCard label="On Hold" value={stats.counts.HOLD} sub="Needs review" color="#7c3aed"
           active={filters.status === "HOLD"} onClick={() => set("status", "HOLD")} />
-        <StatCard label="Denied" value={stats.counts.DENIED} sub="Rejected" color="#dc2626"
-          active={filters.status === "DENIED"} onClick={() => set("status", "DENIED")} />
+        <StatCard label="Rejected" value={stats.counts.REJECTED} sub="Any outcome" color="#dc2626"
+          active={filters.status === "REJECTED"} onClick={() => set("status", "REJECTED")} />
         <StatCard label="Paid" value={stats.counts.PAID} sub={"$" + fmtAmt(stats.paidTotal) + " total"} color="#059669"
           active={filters.status === "PAID"} onClick={() => set("status", "PAID")} />
       </div>
@@ -677,7 +739,7 @@ function FinanceDashboard({ invoices, stores, users, filters, setFilters }) {
             <option value="">All</option>
             <option value="PENDING">Pending</option>
             <option value="APPROVED">Approved</option>
-            <option value="DENIED">Denied</option>
+            <option value="REJECTED">Rejected</option>
             <option value="HOLD">Hold</option>
             <option value="PAID">Paid</option>
           </select>
@@ -739,9 +801,15 @@ function Pill({ tone, children, pulse }) {
 }
 
 function LateBanner({ invoices, now }) {
-  const late = invoices.filter(i => {
-    const s = slaState(i, now);
-    return s && s.level === "late";
+  // Count individual STORE CHAINS past the deadline, since each chain has its
+  // own clock. One 4-store invoice can contribute several overdue chains.
+  const late = [];
+  invoices.forEach(i => {
+    getChains(i).forEach(c => {
+      if (c.status !== "PENDING") return;
+      const s = slaState(c, now);
+      if (s && s.level === "late") late.push({ inv: i, chain: c });
+    });
   });
   if (!late.length) return null;
   return (
@@ -749,10 +817,11 @@ function LateBanner({ invoices, now }) {
       <div className="flex items-center justify-between gap-4">
         <div>
           <p className="font-semibold text-red-800">
-            {late.length} invoice{late.length > 1 ? "s" : ""} past the {SLA_PHRASE} deadline
+            {late.length} store approval{late.length > 1 ? "s" : ""} past the {SLA_PHRASE} deadline
           </p>
           <p className="text-sm text-red-700">
-            {late.slice(0, 3).map(i => i.vendor + " ($" + Number(i.amount).toLocaleString() + ")").join(" · ")}
+            {late.slice(0, 3).map(x =>
+              x.inv.vendor + " → " + x.chain.storeName).join(" · ")}
             {late.length > 3 ? " and " + (late.length - 3) + " more" : ""}
           </p>
         </div>
@@ -876,9 +945,98 @@ function ViewAsModal({ dir, onPick, onClose }) {
   );
 }
 
+// Searchable multi-select store picker. Matches on store number, name,
+// entity, division, and manager, so "23086", "atlanta", or "al's" all work.
+function StorePicker({ stores, selectedIds, onChange }) {
+  const [q, setQ] = useState("");
+  const [open, setOpen] = useState(false);
+  const boxRef = useRef(null);
+
+  useEffect(() => {
+    function onDoc(e) {
+      if (boxRef.current && !boxRef.current.contains(e.target)) setOpen(false);
+    }
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, []);
+
+  const shown = useMemo(() => {
+    const t = q.trim().toLowerCase();
+    if (!t) return stores;
+    return stores.filter(s =>
+      (s.name || "").toLowerCase().includes(t) ||
+      (s.storeNumber || "").toLowerCase().includes(t) ||
+      (s.storeNumber || "").replace(/^#0*/, "").toLowerCase().includes(t.replace(/^#0*/, "")) ||
+      (s.entity || "").toLowerCase().includes(t) ||
+      (s.division || "").toLowerCase().includes(t) ||
+      (s.storeManager || "").toLowerCase().includes(t));
+  }, [q, stores]);
+
+  const selected = stores.filter(s => selectedIds.includes(s.id));
+
+  function toggle(id) {
+    onChange(selectedIds.includes(id)
+      ? selectedIds.filter(x => x !== id)
+      : [...selectedIds, id]);
+  }
+
+  return (
+    <div ref={boxRef} className="relative">
+      {selected.length > 0 && (
+        <div className="mb-2 flex flex-wrap gap-1.5">
+          {selected.map(s => (
+            <span key={s.id}
+              className="inline-flex items-center gap-1.5 rounded-full bg-slate-900 px-2.5 py-1 text-xs text-white">
+              <span>{s.storeNumber} {s.name.replace(/#\S+\s*/, "")}</span>
+              <button type="button" onClick={() => toggle(s.id)}
+                className="text-slate-300 hover:text-white" title="Remove">✕</button>
+            </span>
+          ))}
+        </div>
+      )}
+
+      <input value={q}
+        onFocus={() => setOpen(true)}
+        onChange={e => { setQ(e.target.value); setOpen(true); }}
+        placeholder="Search store # / name / entity…  e.g. 23086, atlanta, al's"
+        className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+
+      {open && (
+        <div className="absolute z-10 mt-1 max-h-64 w-full overflow-y-auto rounded-lg border
+                        border-slate-200 bg-white shadow-lg">
+          {shown.length === 0 && (
+            <p className="px-3 py-4 text-center text-sm text-slate-400">No stores match.</p>
+          )}
+          {shown.map(s => {
+            const on = selectedIds.includes(s.id);
+            return (
+              <button type="button" key={s.id} onClick={() => toggle(s.id)}
+                className={"flex w-full items-start gap-2 px-3 py-2 text-left hover:bg-slate-50 " +
+                           (on ? "bg-sky-50" : "")}>
+                <span className={"mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border text-[10px] " +
+                                 (on ? "border-sky-600 bg-sky-600 text-white" : "border-slate-300 bg-white")}>
+                  {on ? "✓" : ""}
+                </span>
+                <span className="min-w-0">
+                  <span className="block truncate text-sm font-medium text-slate-900">
+                    {s.name}
+                  </span>
+                  <span className="block truncate text-xs text-slate-500">
+                    {[s.division, s.entity].filter(Boolean).join(" · ") || "—"}
+                  </span>
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function NewInvoice({ stores, users, currentUser, onDone }) {
   const fs = useFilestack();
-  const [storeId, setStoreId] = useState("");
+  const [storeIds, setStoreIds] = useState([]);
   const [vendor, setVendor]   = useState("");
   const [amount, setAmount]   = useState("");
   const [invoiceNumber, setInvoiceNumber] = useState("");
@@ -887,9 +1045,9 @@ function NewInvoice({ stores, users, currentUser, onDone }) {
   const [uploading, setUploading] = useState(false);
   const [err, setErr]         = useState("");
 
-  const store = stores.find(s => s.id === storeId);
+  const selStores = stores.filter(s => storeIds.includes(s.id));
   const amt   = parseFloat(amount) || 0;
-  const chain = store ? buildApprovalChain(store, amt, users) : [];
+  const previewChains = selStores.length ? buildChains(selStores, amt, users, Date.now()) : [];
 
   function pickFile() {
     setErr("");
@@ -902,8 +1060,9 @@ function NewInvoice({ stores, users, currentUser, onDone }) {
       accept: ["application/pdf", "image/*"],
       maxFiles: 1,
       fromSources: ["local_file_system", "googledrive", "dropbox", "onedrive"],
-      // Files land under the store so invoices stay traceable in Filestack.
-      storeTo: { path: "/invoices/" + (store ? store.storeNumber || store.id : "unfiled") + "/" },
+      // Files land under the first store so invoices stay traceable in Filestack.
+      storeTo: { path: "/invoices/" +
+        (selStores.length ? (selStores[0].storeNumber || selStores[0].id) : "unfiled") + "/" },
       onUploadDone: r => {
         setUploading(false);
         const f = r.filesUploaded && r.filesUploaded[0];
@@ -920,34 +1079,38 @@ function NewInvoice({ stores, users, currentUser, onDone }) {
 
   async function submit() {
     setErr("");
-    if (!store)        return setErr("Pick a store.");
-    if (!vendor.trim())return setErr("Enter a vendor.");
-    if (!(amt > 0))    return setErr("Enter an amount.");
-    if (!chain.length) return setErr("No approvers found for this store — check the directory.");
+    if (!selStores.length) return setErr("Pick at least one store.");
+    if (!vendor.trim())    return setErr("Enter a vendor.");
+    if (!(amt > 0))        return setErr("Enter an amount.");
+
+    const now = Date.now();
+    const chains = buildChains(selStores, amt, users, now);
+    if (chains.every(c => !c.steps.length))
+      return setErr("No approvers found for these stores — check the directory.");
 
     setBusy(true);
     try {
-      const now = Date.now();
       await invoiceService.create({
         vendor: vendor.trim(),
         amount: amt,
         invoiceNumber: invoiceNumber.trim(),
-        storeId: store.id,
-        storeName: store.name,
-        division: store.division,
-        status: "PENDING",
-        currentStage: chain[0].role,
-        requiredApprovals: chain,
-        history: [],
+        storeIds: selStores.map(s => s.id),
+        storeNames: selStores.map(s => s.name),
+        entities: [...new Set(selStores.map(s => s.entity).filter(Boolean))],
+        storeId: selStores[0].id,
+        storeName: selStores.map(s => s.name).join(" + "),
+        division: [...new Set(selStores.map(s => s.division))].join(" / "),
+        // One independent chain per store.
+        chains,
+        status: deriveStatus(chains),
         fileUrl: file ? file.url : null,
         fileName: file ? file.name : null,
         createdAt: now,
         updatedAt: now,
-        stageEnteredAt: now,          // starts the 48h clock
         createdBy: currentUser.id,
         createdByName: currentUser.name
       });
-      setVendor(""); setAmount(""); setInvoiceNumber(""); setFile(null); setStoreId("");
+      setVendor(""); setAmount(""); setInvoiceNumber(""); setFile(null); setStoreIds([]);
       onDone && onDone();
     } catch (e) {
       setErr(e.message || "Could not save.");
@@ -961,15 +1124,11 @@ function NewInvoice({ stores, users, currentUser, onDone }) {
       <h2 className="text-sm font-semibold text-slate-900">New invoice</h2>
 
       <div className="mt-4 grid gap-3 sm:grid-cols-2">
-        <label className="text-sm">
-          <span className="text-slate-600">Store</span>
-          <select value={storeId} onChange={e => setStoreId(e.target.value)}
-            className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm">
-            <option value="">Select a store…</option>
-            {stores.map(s => (
-              <option key={s.id} value={s.id}>{s.name}</option>
-            ))}
-          </select>
+        <label className="text-sm sm:col-span-2">
+          <span className="text-slate-600">Store(s)</span>
+          <div className="mt-1">
+            <StorePicker stores={stores} selectedIds={storeIds} onChange={setStoreIds} />
+          </div>
         </label>
 
         <label className="text-sm">
@@ -1016,23 +1175,34 @@ function NewInvoice({ stores, users, currentUser, onDone }) {
         )}
       </div>
 
-      {store && (
+      {selStores.length > 0 && (
         <div className="mt-4 rounded-lg bg-slate-50 p-3">
           <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
-            Routes to · {store.division}
+            Routes to · {selStores.length} independent chain{selStores.length > 1 ? "s" : ""}
           </p>
-          {chain.length ? (
-            <ol className="mt-2 space-y-1">
-              {chain.map((s, i) => (
-                <li key={i} className="text-sm text-slate-700">
-                  <span className="font-medium">{i + 1}. {s.label}</span> — {s.name}
-                  {s.note && <span className="ml-1 text-xs text-slate-500">({s.note})</span>}
-                </li>
-              ))}
-            </ol>
-          ) : (
-            <p className="mt-2 text-sm text-red-700">No approvers found for this store.</p>
-          )}
+          <div className="mt-2 space-y-2">
+            {previewChains.map((c, ci) => (
+              <div key={ci} className="rounded-lg border border-slate-200 bg-white px-3 py-2">
+                <p className="text-sm font-medium text-slate-800">{c.storeName}</p>
+                <p className="text-xs text-slate-500">
+                  {[c.division, c.entity].filter(Boolean).join(" · ") || "—"}
+                </p>
+                {c.steps.length ? (
+                  <p className="mt-1 text-xs text-slate-600">
+                    {c.steps.map(s => s.label + ": " + s.name).join("  →  ")}
+                  </p>
+                ) : (
+                  <p className="mt-1 text-xs text-red-700">
+                    No approvers on file — this chain cannot route.
+                  </p>
+                )}
+              </div>
+            ))}
+          </div>
+          <p className="mt-2 text-xs text-slate-400">
+            Each store approves independently. If some approve and others reject,
+            payment is processed for the approved stores only.
+          </p>
         </div>
       )}
 
@@ -1130,12 +1300,118 @@ function CommentThread({ invoiceId, currentUser, canPost }) {
   );
 }
 
-function InvoiceRow({ inv, users, currentUser, now, onAct, canFinance }) {
+function ChainCard({ inv, chain, chainIdx, currentUser, now, onAct, canFinance }) {
   const [note, setNote] = useState("");
+  const sla  = chain.status === "PENDING" ? slaState(chain, now) : null;
+  const mine = canActOnChain(currentUser, chain) && !currentUser._sim;
+  const step = chainCurrentStep(chain);
+
+  const badge =
+    chain.status === "APPROVED" ? <Pill tone="ok">Approved</Pill> :
+    chain.status === "REJECTED" ? <Pill tone="late">Rejected</Pill> :
+    chain.status === "HOLD"     ? <span className="rounded-full border border-violet-300 bg-violet-50 px-2 py-0.5 text-xs font-medium text-violet-700">On hold</span> :
+    sla ? <span title={slaTitle(sla)}><Pill tone={sla.level} pulse={sla.level === "late"}>{slaLabel(sla)}{sla.paused ? " ⏸" : ""}</Pill></span> : null;
+
+  return (
+    <div className={"rounded-lg border px-3 py-2 " +
+      (chain.status === "APPROVED" ? "border-emerald-200 bg-emerald-50/40" :
+       chain.status === "REJECTED" ? "border-red-200 bg-red-50/40" :
+       chain.status === "HOLD"     ? "border-violet-200 bg-violet-50/40" :
+       "border-slate-200 bg-white")}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="min-w-0">
+          <p className="truncate text-sm font-medium text-slate-900">{chain.storeName}</p>
+          <p className="truncate text-xs text-slate-500">
+            {[chain.division, chain.entity].filter(Boolean).join(" · ") || "—"}
+          </p>
+        </div>
+        {badge}
+      </div>
+
+      {chain.status === "PENDING" && step && (
+        <p className="mt-1 text-xs text-slate-600">
+          Waiting on <span className="font-medium">{step.label}</span> — {step.name}
+        </p>
+      )}
+
+      {/* Step trail for this chain */}
+      <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5 text-xs">
+        {(chain.steps || []).map((s, si) => {
+          const done = (chain.history || []).some(h => h.stage === s.role && h.action === "APPROVE");
+          const rejectedHere = (chain.history || []).some(h => h.stage === s.role && h.action === "REJECT");
+          const cur = chain.currentStage === s.role && chain.status === "PENDING";
+          return (
+            <span key={si}
+              className={rejectedHere ? "text-red-600" : done ? "text-emerald-600" :
+                         cur ? "font-medium text-slate-800" : "text-slate-400"}>
+              {rejectedHere ? "✗" : done ? "✓" : cur ? "→" : "•"} {s.label}
+            </span>
+          );
+        })}
+      </div>
+
+      {(chain.history || []).length > 0 && (
+        <ul className="mt-1.5 space-y-0.5">
+          {chain.history.map((h, hi) => (
+            <li key={hi} className="text-xs text-slate-500">
+              <span className="font-medium text-slate-600">{h.byName}</span>{" "}
+              {h.action === "APPROVE" ? "approved" : h.action === "REJECT" ? "rejected" :
+               h.action === "HOLD" ? "put on hold" : h.action === "RESUME" ? "resumed" : h.action.toLowerCase()}{" "}
+              · {new Date(h.ts).toLocaleString()}
+              {h.note && <span className="block pl-2 italic">"{h.note}"</span>}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {mine && (
+        <div className="mt-2 border-t border-slate-200 pt-2">
+          <input value={note} onChange={e => setNote(e.target.value)}
+            placeholder="Note for this store (optional)"
+            className="w-full rounded-lg border border-slate-300 px-3 py-1.5 text-sm" />
+          <div className="mt-1.5 flex flex-wrap gap-2">
+            <button onClick={() => { onAct(inv, chainIdx, "APPROVE", note); setNote(""); }}
+              className="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-700">
+              Approve
+            </button>
+            <button onClick={() => { onAct(inv, chainIdx, "HOLD", note); setNote(""); }}
+              className="rounded-lg bg-violet-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-violet-700">
+              Hold
+            </button>
+            <button onClick={() => { onAct(inv, chainIdx, "REJECT", note); setNote(""); }}
+              className="rounded-lg bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-700">
+              Reject
+            </button>
+          </div>
+        </div>
+      )}
+
+      {chain.status === "HOLD" && canFinance && (
+        <button onClick={() => onAct(inv, chainIdx, "RESUME", "")}
+          className="mt-2 rounded-lg border border-violet-300 bg-white px-3 py-1.5 text-sm font-medium text-violet-700 hover:bg-violet-50">
+          Put back in queue
+        </button>
+      )}
+    </div>
+  );
+}
+
+function InvoiceRow({ inv, users, currentUser, now, onAct, onMarkPaid, canFinance }) {
   const [open, setOpen] = useState(false);
-  const sla  = slaState(inv, now);
-  const mine = canUserAct(currentUser, inv);
-  const step = (inv.requiredApprovals || []).find(s => s.role === inv.currentStage);
+  const chains = getChains(inv);
+  const mineAny = canUserAct(currentUser, inv) && !currentUser._sim;
+
+  const approved = chains.filter(c => c.status === "APPROVED").length;
+  const rejected = chains.filter(c => c.status === "REJECTED").length;
+  const resolved = chains.every(c => c.status === "APPROVED" || c.status === "REJECTED");
+
+  // Most urgent SLA across pending chains for the card-level pill.
+  const worst = chains
+    .filter(c => c.status === "PENDING")
+    .map(c => slaState(c, now)).filter(Boolean)
+    .sort((a, b) => a.remainingH - b.remainingH)[0] || null;
+
+  const showChains = open || mineAny;   // auto-expand when it is your turn
 
   return (
     <div className="rounded-xl border bg-white p-4 shadow-sm">
@@ -1146,23 +1422,29 @@ function InvoiceRow({ inv, users, currentUser, now, onAct, canFinance }) {
             <span className="text-sm text-slate-500">
               ${Number(inv.amount).toLocaleString(undefined, { minimumFractionDigits: 2 })}
             </span>
-            {inv.status === "PENDING" && sla && (
-              <span title={slaTitle(sla)}>
-                <Pill tone={sla.level} pulse={sla.level === "late"}>
-                  {slaLabel(sla)}{sla.paused ? " ⏸" : ""}
+            {inv.status === "PENDING" && worst && (
+              <span title={slaTitle(worst)}>
+                <Pill tone={worst.level} pulse={worst.level === "late"}>
+                  {slaLabel(worst)}{worst.paused ? " ⏸" : ""}
                 </Pill>
               </span>
             )}
-            <Badge status={inv.status} />
+            {inv.status === "PAID" && <Pill tone="ok">Paid</Pill>}
+            {inv.status === "APPROVED" && (
+              <Pill tone="ok">{approved} of {chains.length} approved</Pill>
+            )}
+            {inv.status === "REJECTED" && <Pill tone="late">All chains rejected</Pill>}
+            {chains.length > 1 && inv.status === "PENDING" && (approved > 0 || rejected > 0) && (
+              <span className="text-xs text-slate-500">
+                {approved} approved · {rejected} rejected · {chains.length - approved - rejected} pending
+              </span>
+            )}
           </div>
           <p className="mt-1 truncate text-sm text-slate-500">
-            {inv.storeName}{inv.invoiceNumber ? " · #" + inv.invoiceNumber : ""}
+            {chains.length} store{chains.length > 1 ? "s" : ""}
+            {inv.invoiceNumber ? " · #" + inv.invoiceNumber : ""}
+            {inv.createdByName ? " · by " + inv.createdByName : ""}
           </p>
-          {inv.status === "PENDING" && step && (
-            <p className="mt-1 text-sm text-slate-600">
-              Waiting on <span className="font-medium">{step.label}</span> — {step.name}
-            </p>
-          )}
         </div>
 
         <div className="flex items-center gap-2">
@@ -1174,95 +1456,67 @@ function InvoiceRow({ inv, users, currentUser, now, onAct, canFinance }) {
           )}
           <button onClick={() => setOpen(o => !o)}
             className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-50">
-            {open ? "Hide" : "Details"}
+            {showChains ? "Hide" : "Details"}
           </button>
         </div>
       </div>
 
-      {mine && (
-        <div className="mt-3 rounded-lg bg-slate-50 p-3">
-          <input value={note} onChange={e => setNote(e.target.value)}
-            placeholder="Add a note (optional)"
-            className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" />
-          <div className="mt-2 flex flex-wrap gap-2">
-            <button onClick={() => onAct(inv, "APPROVE", note)}
-              className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700">
-              Approve
-            </button>
-            <button onClick={() => onAct(inv, "HOLD", note)}
-              className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-700">
-              Hold
-            </button>
-            <button onClick={() => onAct(inv, "REJECT", note)}
-              className="rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700">
-              Reject
-            </button>
+      {/* Inline preview: approvers verify amount and invoice number here, so
+          the document renders above the chain actions. */}
+      {mineAny && inv.fileUrl && (
+        <div className="mt-3 overflow-hidden rounded-lg border border-slate-200 bg-white">
+          {/\.(png|jpe?g|gif|webp)(\?|$)/i.test(inv.fileUrl) ? (
+            <div className="max-h-96 overflow-y-auto">
+              <img src={inv.fileUrl} alt={inv.fileName || "invoice"} className="w-full" />
+            </div>
+          ) : (
+            <iframe src={inv.fileUrl} title={inv.fileName || "invoice preview"}
+                    className="h-96 w-full" />
+          )}
+          <div className="flex items-center justify-between border-t bg-slate-50 px-3 py-1.5">
+            <span className="truncate text-xs text-slate-500">{inv.fileName || "Attached file"}</span>
+            <a href={inv.fileUrl} target="_blank" rel="noopener noreferrer"
+               className="shrink-0 text-xs font-medium text-sky-700 hover:underline">
+              Open full size ↗
+            </a>
           </div>
         </div>
       )}
+      {mineAny && !inv.fileUrl && (
+        <p className="mt-3 rounded-lg border border-dashed border-slate-300 px-3 py-2 text-xs text-slate-400">
+          No file attached to this invoice.
+        </p>
+      )}
 
-      {/* A held invoice is stuck until someone puts it back in the queue. */}
-      {inv.status === "HOLD" && canFinance && (
-        <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg bg-violet-50 p-3">
-          <span className="text-sm text-violet-800">On hold — needs review.</span>
-          <button onClick={() => onAct(inv, "RESUME", "")}
-            className="rounded-lg bg-violet-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-violet-700">
-            Release back to {inv.currentStage === "AREA_COACH" ? "Area Coach" :
-                              inv.currentStage === "DIRECTOR" ? "Director" : "VP"}
+      {showChains && (
+        <div className="mt-3 space-y-2">
+          {chains.map((c, ci) => (
+            <ChainCard key={ci} inv={inv} chain={c} chainIdx={ci}
+                       currentUser={currentUser} now={now} onAct={onAct}
+                       canFinance={canFinance} />
+          ))}
+        </div>
+      )}
+
+      {/* Finance processes payment once every chain has resolved. Pays the
+          approved subset — "3 of 4" is a normal outcome, not an error. */}
+      {canFinance && inv.status === "APPROVED" && resolved && approved > 0 && (
+        <div className="mt-3 flex flex-wrap items-center gap-3 rounded-lg bg-emerald-50 p-3">
+          <p className="text-sm text-emerald-800">
+            {approved === chains.length
+              ? "All " + chains.length + " store" + (chains.length > 1 ? "s" : "") + " approved."
+              : approved + " of " + chains.length + " stores approved — pay the approved stores only."}
+          </p>
+          <button onClick={() => onMarkPaid(inv)}
+            className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700">
+            Mark paid
           </button>
         </div>
       )}
 
-      {/* Only finance closes the loop by marking an approved invoice paid. */}
-      {inv.status === "APPROVED" && canFinance && (
-        <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg bg-emerald-50 p-3">
-          <span className="text-sm text-emerald-800">Fully approved — ready for payment.</span>
-          <button onClick={() => onAct(inv, "PAID", "")}
-            className="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-700">
-            Mark as paid
-          </button>
-        </div>
-      )}
-
-      {open && (
-        <div className="mt-3 border-t pt-3">
-          <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Approval chain</p>
-          <ol className="mt-2 space-y-1">
-            {(inv.requiredApprovals || []).map((s, i) => {
-              const done = (inv.history || []).some(h => h.stage === s.role && h.action === "APPROVE");
-              const cur  = inv.currentStage === s.role && inv.status === "PENDING";
-              return (
-                <li key={i} className="text-sm">
-                  <span className={done ? "text-emerald-700" : cur ? "font-medium text-slate-900" : "text-slate-500"}>
-                    {done ? "✓" : cur ? "→" : "•"} {s.label} — {s.name}
-                  </span>
-                </li>
-              );
-            })}
-          </ol>
-
-          {(inv.history || []).length > 0 && (
-            <>
-              <p className="mt-3 text-xs font-medium uppercase tracking-wide text-slate-500">History</p>
-              <ul className="mt-2 space-y-1">
-                {inv.history.map((h, i) => (
-                  <li key={i} className="text-sm text-slate-600">
-                    <span className="font-medium">{h.byName}</span>{" "}
-                    {({ APPROVE: "approved", REJECT: "denied", HOLD: "put on hold",
-                        RESUME: "released the hold", PAID: "marked paid" })[h.action] || h.action}{" "}
-                    <span className="text-slate-400">
-                      · {new Date(h.ts).toLocaleString()}
-                    </span>
-                    {h.note && <span className="block text-slate-500">“{h.note}”</span>}
-                  </li>
-                ))}
-              </ul>
-            </>
-          )}
-
-          <CommentThread invoiceId={inv.id} currentUser={currentUser}
-                         canPost={!currentUser._sim} />
-        </div>
+      {(open || mineAny) && (
+        <CommentThread invoiceId={inv.id} currentUser={currentUser}
+                       canPost={!currentUser._sim} />
       )}
     </div>
   );
@@ -1411,9 +1665,10 @@ function App() {
     if (!session) return [];
     if (canSeeAll) return invoices;
     return invoices.filter(i =>
-      (i.requiredApprovals || []).some(s => (s.userIds || []).includes(session.id)) ||
+      getChains(i).some(c => (c.steps || []).some(s => (s.userIds || []).includes(session.id))) ||
       i.createdBy === session.id ||
-      (session.storeId && i.storeId === session.storeId));
+      (session.storeId && (i.storeId === session.storeId ||
+        (i.storeIds || []).includes(session.storeId))));
   }, [invoices, session, canSeeAll]);
 
   // Filters apply to the finance/admin dashboard only.
@@ -1423,9 +1678,10 @@ function App() {
     return visible.filter(i => {
       if (filters.status && i.status !== filters.status) return false;
       if (filters.division && i.division !== filters.division) return false;
-      if (filters.store && i.storeId !== filters.store) return false;
-      if (filters.approver && !(i.requiredApprovals || [])
-            .some(s => (s.userIds || []).includes(filters.approver))) return false;
+      if (filters.store && i.storeId !== filters.store &&
+          !(i.storeIds || []).includes(filters.store)) return false;
+      if (filters.approver && !getChains(i).some(c => (c.steps || [])
+            .some(s => (s.userIds || []).includes(filters.approver)))) return false;
       if (q && !((i.vendor || "").toLowerCase().includes(q) ||
                  (i.invoiceNumber || "").toLowerCase().includes(q) ||
                  (i.storeName || "").toLowerCase().includes(q))) return false;
@@ -1526,64 +1782,75 @@ function App() {
         )}
         {shown.map(inv => (
           <InvoiceRow key={inv.id} inv={inv} users={dir.users} currentUser={session}
-                      now={now} onAct={act} canFinance={canSeeAll && !session._sim} />
+                      now={now} onAct={act} onMarkPaid={markPaid}
+                      canFinance={canSeeAll && !session._sim} />
         ))}
       </div>
       )}
     </div>
   );
 
-  async function act(inv, action, note) {
+  async function act(inv, chainIdx, action, note) {
     // An impersonated session must never write — it is a view, not a login.
     if (session._sim) { setErr("You're viewing as someone else. Return to your account to act."); return; }
+
+    const chains = getChains(inv).map(c => ({ ...c, history: [...(c.history || [])] }));
+    const chain = chains[chainIdx];
+    if (!chain) return;
+    if (chain._legacy) { setErr("This invoice predates per-store chains. Ask IT to migrate or re-file it."); return; }
+
     const ts = Date.now();
-    const entry = { stage: inv.currentStage, by: session.id, byName: session.name,
-                    action, note: note || "", ts };
-    const history = [...(inv.history || []), entry];
+    chain.history.push({ stage: chain.currentStage, by: session.id, byName: session.name,
+                         action, note: note || "", ts });
 
     if (action === "REJECT") {
-      await invoiceService.update(inv.id, {
-        status: "DENIED", history, updatedAt: ts, stageEnteredAt: null
-      });
-      return;
+      chain.status = "REJECTED"; chain.stageEnteredAt = null;
+    } else if (action === "HOLD") {
+      chain.status = "HOLD"; chain.stageEnteredAt = null;
+    } else if (action === "RESUME") {
+      chain.status = "PENDING"; chain.stageEnteredAt = ts;
+    } else if (action === "APPROVE") {
+      const idx = chain.steps.findIndex(s => s.role === chain.currentStage);
+      const next = chain.steps[idx + 1];
+      if (next) {
+        chain.currentStage = next.role;
+        chain.stageEnteredAt = ts;         // clock resets for the next approver
+      } else {
+        chain.status = "APPROVED";
+        chain.currentStage = "APPROVED";
+        chain.stageEnteredAt = null;
+      }
     }
 
-    // Hold parks the invoice at its current stage and stops the SLA clock, so
-    // an invoice waiting on a vendor question doesn't accrue overdue hours.
-    if (action === "HOLD") {
-      await invoiceService.update(inv.id, {
-        status: "HOLD", history, updatedAt: ts, stageEnteredAt: null
-      });
-      return;
-    }
+    await invoiceService.update(inv.id, {
+      chains,
+      status: deriveStatus(chains),
+      updatedAt: ts
+    });
+  }
 
-    // Releasing a hold restarts the clock for whoever it was parked on.
-    if (action === "RESUME") {
-      await invoiceService.update(inv.id, {
-        status: "PENDING", history, updatedAt: ts, stageEnteredAt: ts
-      });
-      return;
-    }
-
-    if (action === "PAID") {
-      await invoiceService.update(inv.id, {
-        status: "PAID", currentStage: "PAID", history, updatedAt: ts,
-        paidAt: ts, stageEnteredAt: null
-      });
-      return;
-    }
-
-    const chain = inv.requiredApprovals || [];
-    const idx   = chain.findIndex(s => s.role === inv.currentStage);
-    const next  = chain[idx + 1];
-
-    await invoiceService.update(inv.id, next
-      ? { currentStage: next.role, history, updatedAt: ts, stageEnteredAt: ts }  // clock resets
-      : { status: "APPROVED", currentStage: "APPROVED", history, updatedAt: ts, stageEnteredAt: null });
+  async function markPaid(inv) {
+    if (session._sim) { setErr("You're viewing as someone else. Return to your account to act."); return; }
+    const ts = Date.now();
+    await invoiceService.update(inv.id, {
+      status: "PAID", paidAt: ts, updatedAt: ts,
+      paidBy: session.id, paidByName: session.name
+    });
   }
 }
 
-ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+function Shell() {
+  return (
+    <div className="flex min-h-screen flex-col">
+      <div className="flex-1"><App /></div>
+      <footer className="border-t bg-white px-4 py-3 text-center text-xs text-slate-400">
+        AP Invoice Routing · v{CFG.version} · Dossani Paradise
+      </footer>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<Shell />);
 </script>
 </body>
 </html>
