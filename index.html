@@ -30,7 +30,7 @@
 <script>
 window.APP_CONFIG = {
   // Shown in the footer for all users. Increment on every update.
-  version: "1.2",
+  version: "1.3",
   // Firestore
   firebase: {
     apiKey: "AIzaSyAxW6wajL9PH1Wlw3_QuBXgAMFgYWjkJp8",
@@ -131,6 +131,15 @@ window.dispatchEvent(new Event("firebase-ready"));
 <script type="text/babel">
 const { useState, useEffect, useMemo, useRef } = React;
 const CFG = window.APP_CONFIG;
+
+// Human-readable role names. The AREA_COACH key is kept internally (it is in
+// the directory mapping and in stored invoices) but is never shown to users —
+// the org now calls this role District Manager.
+const ROLE_LABELS = {
+  ADMIN: "Admin", FINANCE: "Finance", DIRECTOR: "Director of Ops",
+  AREA_COACH: "District Manager", VP: "VP of Ops", MANAGER: "Store Manager"
+};
+function roleLabel(r) { return ROLE_LABELS[r] || (r || "").replace(/_/g, " "); }
 
 /* ============================================================
    1. DIRECTORY ADAPTER
@@ -235,7 +244,7 @@ function buildStoreChainSteps(store, amount, users) {
   const acIds = (store.acIds || []).filter(id => users[id]);
   if (acIds.length) {
     steps.push({
-      role: "AREA_COACH", label: "Area Coach / DM",
+      role: "AREA_COACH", label: "District Manager (DM)",
       userIds: acIds, userId: acIds[0],
       name: acIds.map(nameOf).join(" or ")
     });
@@ -246,7 +255,7 @@ function buildStoreChainSteps(store, amount, users) {
       role: "DIRECTOR", label: "Director of Ops",
       userIds: [store.directorId], userId: store.directorId,
       name: nameOf(store.directorId),
-      note: acIds.length ? undefined : "No Area Coach — starts here"
+      note: acIds.length ? undefined : "No District Manager — starts here"
     });
   }
 
@@ -379,7 +388,7 @@ function resolveSession(email, pw, dir) {
   const coach = Object.values(dir.users).find(
     u => emailOf(u) === lc && u.role === "AREA_COACH");
   if (coach) {
-    if (pw !== P.coach) return { error: "That password doesn't match the area coach role." };
+    if (pw !== P.coach) return { error: "That password doesn't match the district manager role." };
     return { id: coach.id, email: lc, name: coach.name, role: "AREA_COACH", scope: "stores" };
   }
 
@@ -416,7 +425,7 @@ function viewAsRoster(dir) {
   const rows = [];
   Object.values(dir.users).forEach(u => {
     rows.push({ kind: "user", id: u.id, primary: u.name,
-                secondary: (u.role || "").replace("_", " "),
+                secondary: roleLabel(u.role),
                 search: (u.name + " " + (u.email || "") + " " + u.role).toLowerCase() });
   });
   CFG.financeUsers.forEach(f => {
@@ -893,7 +902,7 @@ function SimBanner({ session, onReturn }) {
         </span>
         <span className="text-sm text-amber-900">
           <b>{session.name}</b>
-          <span className="ml-2 text-amber-700">{(session.role || "").replace("_", " ")}</span>
+          <span className="ml-2 text-amber-700">{roleLabel(session.role)}</span>
         </span>
       </div>
       <button onClick={onReturn}
@@ -947,10 +956,15 @@ function ViewAsModal({ dir, onPick, onClose }) {
 
 // Searchable multi-select store picker. Matches on store number, name,
 // entity, division, and manager, so "23086", "atlanta", or "al's" all work.
+// Searchable multi-select store picker. Matches on store number, name,
+// entity, division, and manager, so "23086", "atlanta", or "al's" all work.
+// Selecting clears the typed text and keeps the list open, so adding several
+// stores is type → Enter → type → Enter.
 function StorePicker({ stores, selectedIds, onChange }) {
   const [q, setQ] = useState("");
   const [open, setOpen] = useState(false);
   const boxRef = useRef(null);
+  const inputRef = useRef(null);
 
   useEffect(() => {
     function onDoc(e) {
@@ -962,14 +976,14 @@ function StorePicker({ stores, selectedIds, onChange }) {
 
   const shown = useMemo(() => {
     const t = q.trim().toLowerCase();
-    if (!t) return stores;
-    return stores.filter(s =>
+    const base = t ? stores.filter(s =>
       (s.name || "").toLowerCase().includes(t) ||
       (s.storeNumber || "").toLowerCase().includes(t) ||
       (s.storeNumber || "").replace(/^#0*/, "").toLowerCase().includes(t.replace(/^#0*/, "")) ||
       (s.entity || "").toLowerCase().includes(t) ||
       (s.division || "").toLowerCase().includes(t) ||
-      (s.storeManager || "").toLowerCase().includes(t));
+      (s.storeManager || "").toLowerCase().includes(t)) : stores;
+    return base;
   }, [q, stores]);
 
   const selected = stores.filter(s => selectedIds.includes(s.id));
@@ -978,6 +992,19 @@ function StorePicker({ stores, selectedIds, onChange }) {
     onChange(selectedIds.includes(id)
       ? selectedIds.filter(x => x !== id)
       : [...selectedIds, id]);
+    setQ("");                                  // no leftover typed text
+    if (inputRef.current) inputRef.current.focus();
+  }
+
+  function onKey(e) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      // Enter adds the first match that isn't already selected.
+      const first = shown.find(s => !selectedIds.includes(s.id));
+      if (first) toggle(first.id);
+    } else if (e.key === "Escape") {
+      setOpen(false);
+    }
   }
 
   return (
@@ -995,10 +1022,11 @@ function StorePicker({ stores, selectedIds, onChange }) {
         </div>
       )}
 
-      <input value={q}
+      <input ref={inputRef} value={q}
         onFocus={() => setOpen(true)}
         onChange={e => { setQ(e.target.value); setOpen(true); }}
-        placeholder="Search store # / name / entity…  e.g. 23086, atlanta, al's"
+        onKeyDown={onKey}
+        placeholder="Type store # or name, press Enter to add"
         className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" />
 
       {open && (
@@ -1007,23 +1035,19 @@ function StorePicker({ stores, selectedIds, onChange }) {
           {shown.length === 0 && (
             <p className="px-3 py-4 text-center text-sm text-slate-400">No stores match.</p>
           )}
-          {shown.map(s => {
+          {shown.map((s, si) => {
             const on = selectedIds.includes(s.id);
+            const isFirst = !on && shown.find(x => !selectedIds.includes(x.id)) === s;
             return (
               <button type="button" key={s.id} onClick={() => toggle(s.id)}
-                className={"flex w-full items-start gap-2 px-3 py-2 text-left hover:bg-slate-50 " +
-                           (on ? "bg-sky-50" : "")}>
-                <span className={"mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border text-[10px] " +
-                                 (on ? "border-sky-600 bg-sky-600 text-white" : "border-slate-300 bg-white")}>
-                  {on ? "✓" : ""}
-                </span>
-                <span className="min-w-0">
-                  <span className="block truncate text-sm font-medium text-slate-900">
-                    {s.name}
-                  </span>
-                  <span className="block truncate text-xs text-slate-500">
-                    {[s.division, s.entity].filter(Boolean).join(" · ") || "—"}
-                  </span>
+                className={"flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-slate-50 " +
+                           (on ? "bg-sky-50 text-sky-900" : "text-slate-800") +
+                           (isFirst && q ? " bg-slate-50" : "")}>
+                <span className="w-4 shrink-0 text-center text-sky-600">{on ? "✓" : ""}</span>
+                <span className="shrink-0 font-medium">{s.storeNumber}</span>
+                <span className="min-w-0 truncate">{s.name.replace(/#\S+\s*/, "")}</span>
+                <span className="min-w-0 flex-1 truncate text-right text-xs text-slate-400">
+                  {s.entity || s.division || ""}
                 </span>
               </button>
             );
@@ -1123,7 +1147,12 @@ function NewInvoice({ stores, users, currentUser, onDone }) {
     <div className="rounded-xl border bg-white p-5 shadow-sm">
       <h2 className="text-sm font-semibold text-slate-900">New invoice</h2>
 
-      <div className="mt-4 grid gap-3 sm:grid-cols-2">
+      {/* Two columns on wide screens: fields on the left, the uploaded
+          document on the right — AP reads the amount and invoice # straight
+          off the preview while keying them in. */}
+      <div className="mt-4 grid gap-5 lg:grid-cols-2">
+        <div>
+      <div className="grid gap-3 sm:grid-cols-2">
         <label className="text-sm sm:col-span-2">
           <span className="text-slate-600">Store(s)</span>
           <div className="mt-1">
@@ -1212,6 +1241,46 @@ function NewInvoice({ stores, users, currentUser, onDone }) {
         className="mt-4 rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50">
         {busy ? "Saving…" : "Send for approval"}
       </button>
+        </div>
+
+        {/* Right column: live preview of the uploaded document. Sticky so it
+            stays alongside while the form scrolls. */}
+        <div className="lg:sticky lg:top-4 lg:self-start">
+          {uploading ? (
+            <div className="flex h-[480px] items-center justify-center rounded-lg border
+                            border-slate-200 bg-slate-50">
+              <p className="text-sm text-slate-500">Uploading…</p>
+            </div>
+          ) : file ? (
+            <div className="overflow-hidden rounded-lg border border-slate-200">
+              {/\.(png|jpe?g|gif|webp)(\?|$)/i.test(file.url) ? (
+                <div className="max-h-[480px] overflow-y-auto bg-slate-100">
+                  <img src={file.url} alt={file.name} className="w-full" />
+                </div>
+              ) : (
+                <iframe src={file.url} title="Invoice preview"
+                        className="h-[480px] w-full bg-slate-100" />
+              )}
+              <div className="flex items-center justify-between border-t bg-slate-50 px-3 py-1.5">
+                <span className="truncate text-xs text-slate-500">{file.name}</span>
+                <a href={file.url} target="_blank" rel="noopener noreferrer"
+                   className="shrink-0 text-xs font-medium text-sky-700 hover:underline">
+                  Open full size ↗
+                </a>
+              </div>
+            </div>
+          ) : (
+            <div className="flex h-[480px] flex-col items-center justify-center gap-2 rounded-lg
+                            border-2 border-dashed border-slate-200 bg-slate-50/50">
+              <p className="text-sm text-slate-400">No document yet</p>
+              <p className="px-6 text-center text-xs text-slate-400">
+                Attach the invoice PDF and it will preview here so you can read
+                the amount and invoice # while you type.
+              </p>
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -1264,7 +1333,7 @@ function CommentThread({ invoiceId, currentUser, canPost }) {
                 <div className="flex flex-wrap items-baseline gap-2">
                   <span className="text-sm font-medium text-slate-800">{c.userName}</span>
                   <span className="text-xs text-slate-400">
-                    {(c.userRole || "").replace("_", " ")} · {new Date(c.ts).toLocaleString()}
+                    {roleLabel(c.userRole)} · {new Date(c.ts).toLocaleString()}
                   </span>
                 </div>
                 <p className="mt-0.5 whitespace-pre-wrap text-sm text-slate-700">{c.text}</p>
@@ -1461,40 +1530,44 @@ function InvoiceRow({ inv, users, currentUser, now, onAct, onMarkPaid, canFinanc
         </div>
       </div>
 
-      {/* Inline preview: approvers verify amount and invoice number here, so
-          the document renders above the chain actions. */}
-      {mineAny && inv.fileUrl && (
-        <div className="mt-3 overflow-hidden rounded-lg border border-slate-200 bg-white">
-          {/\.(png|jpe?g|gif|webp)(\?|$)/i.test(inv.fileUrl) ? (
-            <div className="max-h-96 overflow-y-auto">
-              <img src={inv.fileUrl} alt={inv.fileName || "invoice"} className="w-full" />
-            </div>
-          ) : (
-            <iframe src={inv.fileUrl} title={inv.fileName || "invoice preview"}
-                    className="h-96 w-full" />
-          )}
-          <div className="flex items-center justify-between border-t bg-slate-50 px-3 py-1.5">
-            <span className="truncate text-xs text-slate-500">{inv.fileName || "Attached file"}</span>
-            <a href={inv.fileUrl} target="_blank" rel="noopener noreferrer"
-               className="shrink-0 text-xs font-medium text-sky-700 hover:underline">
-              Open full size ↗
-            </a>
-          </div>
-        </div>
-      )}
-      {mineAny && !inv.fileUrl && (
-        <p className="mt-3 rounded-lg border border-dashed border-slate-300 px-3 py-2 text-xs text-slate-400">
-          No file attached to this invoice.
-        </p>
-      )}
-
+      {/* When expanded: approval path on the LEFT, document preview on the
+          RIGHT, side by side — approvers read the invoice while they sign. */}
       {showChains && (
-        <div className="mt-3 space-y-2">
-          {chains.map((c, ci) => (
-            <ChainCard key={ci} inv={inv} chain={c} chainIdx={ci}
-                       currentUser={currentUser} now={now} onAct={onAct}
-                       canFinance={canFinance} />
-          ))}
+        <div className={"mt-3 grid gap-4 " + (inv.fileUrl ? "lg:grid-cols-2" : "")}>
+          <div className="space-y-2">
+            {chains.map((c, ci) => (
+              <ChainCard key={ci} inv={inv} chain={c} chainIdx={ci}
+                         currentUser={currentUser} now={now} onAct={onAct}
+                         canFinance={canFinance} />
+            ))}
+            {!inv.fileUrl && (
+              <p className="rounded-lg border border-dashed border-slate-300 px-3 py-2 text-xs text-slate-400">
+                No file attached to this invoice.
+              </p>
+            )}
+          </div>
+
+          {inv.fileUrl && (
+            <div className="lg:sticky lg:top-4 lg:self-start">
+              <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
+                {/\.(png|jpe?g|gif|webp)(\?|$)/i.test(inv.fileUrl) ? (
+                  <div className="max-h-[520px] overflow-y-auto bg-slate-100">
+                    <img src={inv.fileUrl} alt={inv.fileName || "invoice"} className="w-full" />
+                  </div>
+                ) : (
+                  <iframe src={inv.fileUrl} title={inv.fileName || "invoice preview"}
+                          className="h-[520px] w-full bg-slate-100" />
+                )}
+                <div className="flex items-center justify-between border-t bg-slate-50 px-3 py-1.5">
+                  <span className="truncate text-xs text-slate-500">{inv.fileName || "Attached file"}</span>
+                  <a href={inv.fileUrl} target="_blank" rel="noopener noreferrer"
+                     className="shrink-0 text-xs font-medium text-sky-700 hover:underline">
+                    Open full size ↗
+                  </a>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -1705,14 +1778,14 @@ function App() {
   const canCreate = canSeeAll;
 
   return (
-    <div className="mx-auto max-w-4xl p-4 sm:p-6">
+    <div className="mx-auto max-w-6xl p-4 sm:p-6">
       {session._sim && <SimBanner session={session} onReturn={returnToMyAccount} />}
 
       <header className="mb-5 flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-lg font-semibold text-slate-900">AP Invoice Routing</h1>
           <p className="text-sm text-slate-500">
-            {session.name} · {(session.role || "").replace("_", " ")}
+            {session.name} · {roleLabel(session.role)}
           </p>
         </div>
         <div className="flex gap-2">
