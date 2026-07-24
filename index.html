@@ -30,7 +30,7 @@
 <script>
 window.APP_CONFIG = {
   // Shown in the footer for all users. Increment on every update.
-  version: "1.3",
+  version: "1.4",
   // Firestore
   firebase: {
     apiKey: "AIzaSyAxW6wajL9PH1Wlw3_QuBXgAMFgYWjkJp8",
@@ -69,7 +69,7 @@ window.APP_CONFIG = {
     admin:    "Overwatch@76051",
     finance:  "Finance@76051",
     director: "DO@76051",
-    coach:    "AC@76051",
+    coach:    "DM@76051",
     manager:  "Dossani@76051",
     tech:     "Repair@76051"
   },
@@ -1143,123 +1143,170 @@ function NewInvoice({ stores, users, currentUser, onDone }) {
     }
   }
 
+  // Deadline for the whole path: step 1 gets the SLA window from submission,
+  // step 2 gets it from step 1's deadline, and so on. Recomputed live so the
+  // dates shown are what the approvers will actually face.
+  function pathWithDeadlines(steps) {
+    let from = new Date();
+    return steps.map(s => {
+      const dueAt = addBusinessMinutes(from, SLA_HOURS * 60);
+      from = dueAt;
+      return { ...s, dueAt };
+    });
+  }
+  const fmtDue = d => d.toLocaleString(undefined,
+    { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+
   return (
-    <div className="rounded-xl border bg-white p-5 shadow-sm">
-      <h2 className="text-sm font-semibold text-slate-900">New invoice</h2>
+    <div className="grid gap-5 xl:grid-cols-[1fr_minmax(460px,620px)_1fr]">
 
-      {/* Two columns on wide screens: fields on the left, the uploaded
-          document on the right — AP reads the amount and invoice # straight
-          off the preview while keying them in. */}
-      <div className="mt-4 grid gap-5 lg:grid-cols-2">
-        <div>
-      <div className="grid gap-3 sm:grid-cols-2">
-        <label className="text-sm sm:col-span-2">
-          <span className="text-slate-600">Store(s)</span>
-          <div className="mt-1">
-            <StorePicker stores={stores} selectedIds={storeIds} onChange={setStoreIds} />
-          </div>
-        </label>
-
-        <label className="text-sm">
-          <span className="text-slate-600">Vendor</span>
-          <input value={vendor} onChange={e => setVendor(e.target.value)}
-            className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" />
-        </label>
-
-        <label className="text-sm">
-          <span className="text-slate-600">Amount (USD)</span>
-          <input value={amount} onChange={e => setAmount(e.target.value)}
-            inputMode="decimal" placeholder="0.00"
-            className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" />
-        </label>
-
-        <label className="text-sm">
-          <span className="text-slate-600">Invoice #</span>
-          <input value={invoiceNumber} onChange={e => setInvoiceNumber(e.target.value)}
-            className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" />
-        </label>
-      </div>
-
-      <div className="mt-3 flex flex-wrap items-center gap-3">
-        <button type="button" onClick={pickFile} disabled={uploading || !fs}
-          className="rounded-lg border border-slate-300 px-3 py-2 text-sm hover:bg-slate-50 disabled:opacity-50">
-          {uploading ? "Uploading…" : file ? "Replace file" : "Attach invoice PDF"}
-        </button>
-
-        {file && (
-          <span className="flex min-w-0 items-center gap-2 rounded-lg bg-emerald-50 px-3 py-1.5">
-            <span className="truncate text-sm text-emerald-800">{file.name}</span>
-            {file.size ? (
-              <span className="shrink-0 text-xs text-emerald-600">
-                {(file.size / 1024).toFixed(0)} KB
-              </span>
-            ) : null}
-            <button type="button" onClick={() => setFile(null)}
-              className="shrink-0 text-emerald-700 hover:text-emerald-900" title="Remove">✕</button>
-          </span>
-        )}
-
-        {!fs && !uploading && (
-          <span className="text-xs text-slate-400">Upload unavailable</span>
-        )}
-      </div>
-
-      {selStores.length > 0 && (
-        <div className="mt-4 rounded-lg bg-slate-50 p-3">
-          <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
-            Routes to · {selStores.length} independent chain{selStores.length > 1 ? "s" : ""}
-          </p>
-          <div className="mt-2 space-y-2">
-            {previewChains.map((c, ci) => (
-              <div key={ci} className="rounded-lg border border-slate-200 bg-white px-3 py-2">
-                <p className="text-sm font-medium text-slate-800">{c.storeName}</p>
-                <p className="text-xs text-slate-500">
-                  {[c.division, c.entity].filter(Boolean).join(" · ") || "—"}
+      {/* LEFT RAIL — the approval path, with the SLA window and the projected
+          date/time between each approver. */}
+      <div className="order-2 xl:order-1 xl:col-start-1 xl:row-start-1">
+        <div className="rounded-xl border bg-white p-5 shadow-sm xl:sticky xl:top-4">
+          <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-500">
+            Approval path
+          </h3>
+          {selStores.length === 0 ? (
+            <p className="mt-3 text-sm text-slate-400">
+              Pick a store and the route will map out here — who signs, in what
+              order, and by when.
+            </p>
+          ) : (
+            <div className="mt-3 space-y-5">
+              {previewChains.map((c, ci) => (
+                <div key={ci}>
+                  <p className="text-base font-semibold text-slate-900">{c.storeName}</p>
+                  <p className="text-xs text-slate-500">
+                    {[c.division, c.entity].filter(Boolean).join(" · ") || "—"}
+                  </p>
+                  {c.steps.length ? (
+                    <ol className="mt-2">
+                      {pathWithDeadlines(c.steps).map((s, si) => (
+                        <li key={si}>
+                          <div className="flex items-center gap-2">
+                            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full
+                                             bg-slate-900 text-sm font-semibold text-white">
+                              {si + 1}
+                            </span>
+                            <div>
+                              <p className="text-base font-medium text-slate-900">{s.name}</p>
+                              <p className="text-sm text-slate-500">{s.label}</p>
+                            </div>
+                          </div>
+                          <div className="ml-3.5 border-l-2 border-slate-200 py-1.5 pl-5">
+                            <p className="text-sm text-slate-600">
+                              {SLA_PHRASE} — by{" "}
+                              <span className="font-medium text-slate-800">{fmtDue(s.dueAt)}</span>
+                            </p>
+                          </div>
+                        </li>
+                      ))}
+                      <li className="flex items-center gap-2">
+                        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full
+                                         bg-emerald-600 text-sm text-white">✓</span>
+                        <p className="text-sm font-medium text-emerald-700">Ready for payment</p>
+                      </li>
+                    </ol>
+                  ) : (
+                    <p className="mt-2 text-sm text-red-700">
+                      No approvers on file — this chain cannot route.
+                    </p>
+                  )}
+                </div>
+              ))}
+              {previewChains.length > 1 && (
+                <p className="text-xs text-slate-400">
+                  Each store approves independently. If some approve and others
+                  reject, payment is processed for the approved stores only.
                 </p>
-                {c.steps.length ? (
-                  <p className="mt-1 text-xs text-slate-600">
-                    {c.steps.map(s => s.label + ": " + s.name).join("  →  ")}
-                  </p>
-                ) : (
-                  <p className="mt-1 text-xs text-red-700">
-                    No approvers on file — this chain cannot route.
-                  </p>
-                )}
-              </div>
-            ))}
-          </div>
-          <p className="mt-2 text-xs text-slate-400">
-            Each store approves independently. If some approve and others reject,
-            payment is processed for the approved stores only.
-          </p>
+              )}
+            </div>
+          )}
         </div>
-      )}
+      </div>
 
-      {err && <p className="mt-3 text-sm text-red-700">{err}</p>}
+      {/* CENTER — the form itself. */}
+      <div className="order-1 rounded-xl border bg-white p-5 shadow-sm xl:order-2 xl:col-start-2 xl:row-start-1">
+        <h2 className="text-sm font-semibold text-slate-900">New invoice</h2>
 
-      <button onClick={submit} disabled={busy}
-        className="mt-4 rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50">
-        {busy ? "Saving…" : "Send for approval"}
-      </button>
+        <div className="mt-4 grid gap-3 sm:grid-cols-2">
+          <label className="text-sm sm:col-span-2">
+            <span className="text-slate-600">Store(s)</span>
+            <div className="mt-1">
+              <StorePicker stores={stores} selectedIds={storeIds} onChange={setStoreIds} />
+            </div>
+          </label>
+
+          <label className="text-sm">
+            <span className="text-slate-600">Vendor</span>
+            <input value={vendor} onChange={e => setVendor(e.target.value)}
+              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+          </label>
+
+          <label className="text-sm">
+            <span className="text-slate-600">Amount (USD)</span>
+            <input value={amount} onChange={e => setAmount(e.target.value)}
+              inputMode="decimal" placeholder="0.00"
+              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+          </label>
+
+          <label className="text-sm">
+            <span className="text-slate-600">Invoice #</span>
+            <input value={invoiceNumber} onChange={e => setInvoiceNumber(e.target.value)}
+              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+          </label>
         </div>
 
-        {/* Right column: live preview of the uploaded document. Sticky so it
-            stays alongside while the form scrolls. */}
-        <div className="lg:sticky lg:top-4 lg:self-start">
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <button type="button" onClick={pickFile} disabled={uploading || !fs}
+            className="rounded-lg border border-slate-300 px-3 py-2 text-sm hover:bg-slate-50 disabled:opacity-50">
+            {uploading ? "Uploading…" : file ? "Replace file" : "Attach invoice PDF"}
+          </button>
+
+          {file && (
+            <span className="flex min-w-0 items-center gap-2 rounded-lg bg-emerald-50 px-3 py-1.5">
+              <span className="truncate text-sm text-emerald-800">{file.name}</span>
+              {file.size ? (
+                <span className="shrink-0 text-xs text-emerald-600">
+                  {(file.size / 1024).toFixed(0)} KB
+                </span>
+              ) : null}
+              <button type="button" onClick={() => setFile(null)}
+                className="shrink-0 text-emerald-700 hover:text-emerald-900" title="Remove">✕</button>
+            </span>
+          )}
+
+          {!fs && !uploading && (
+            <span className="text-xs text-slate-400">Upload unavailable</span>
+          )}
+        </div>
+
+        {err && <p className="mt-3 text-sm text-red-700">{err}</p>}
+
+        <button onClick={submit} disabled={busy}
+          className="mt-4 rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50">
+          {busy ? "Saving…" : "Send for approval"}
+        </button>
+      </div>
+
+      {/* RIGHT RAIL — the document, big. Portrait-friendly height. */}
+      <div className="order-3 xl:col-start-3 xl:row-start-1">
+        <div className="xl:sticky xl:top-4">
           {uploading ? (
-            <div className="flex h-[480px] items-center justify-center rounded-lg border
+            <div className="flex h-[75vh] min-h-[560px] items-center justify-center rounded-xl border
                             border-slate-200 bg-slate-50">
               <p className="text-sm text-slate-500">Uploading…</p>
             </div>
           ) : file ? (
-            <div className="overflow-hidden rounded-lg border border-slate-200">
+            <div className="overflow-hidden rounded-xl border border-slate-200 shadow-sm">
               {/\.(png|jpe?g|gif|webp)(\?|$)/i.test(file.url) ? (
-                <div className="max-h-[480px] overflow-y-auto bg-slate-100">
+                <div className="h-[75vh] min-h-[560px] overflow-y-auto bg-slate-100">
                   <img src={file.url} alt={file.name} className="w-full" />
                 </div>
               ) : (
                 <iframe src={file.url} title="Invoice preview"
-                        className="h-[480px] w-full bg-slate-100" />
+                        className="h-[75vh] min-h-[560px] w-full bg-slate-100" />
               )}
               <div className="flex items-center justify-between border-t bg-slate-50 px-3 py-1.5">
                 <span className="truncate text-xs text-slate-500">{file.name}</span>
@@ -1270,12 +1317,11 @@ function NewInvoice({ stores, users, currentUser, onDone }) {
               </div>
             </div>
           ) : (
-            <div className="flex h-[480px] flex-col items-center justify-center gap-2 rounded-lg
-                            border-2 border-dashed border-slate-200 bg-slate-50/50">
+            <div className="flex h-[75vh] min-h-[560px] flex-col items-center justify-center gap-2
+                            rounded-xl border-2 border-dashed border-slate-200 bg-slate-50/50">
               <p className="text-sm text-slate-400">No document yet</p>
               <p className="px-6 text-center text-xs text-slate-400">
-                Attach the invoice PDF and it will preview here so you can read
-                the amount and invoice # while you type.
+                Attach the invoice PDF and it will preview here, full height.
               </p>
             </div>
           )}
@@ -1778,7 +1824,8 @@ function App() {
   const canCreate = canSeeAll;
 
   return (
-    <div className="mx-auto max-w-6xl p-4 sm:p-6">
+    <div className="w-full p-4 sm:p-6">
+      <div className="mx-auto max-w-6xl">
       {session._sim && <SimBanner session={session} onReturn={returnToMyAccount} />}
 
       <header className="mb-5 flex flex-wrap items-center justify-between gap-3">
@@ -1819,11 +1866,17 @@ function App() {
                           filters={filters} setFilters={setFilters} />
       )}
 
+      </div>
+
+      {/* Full-bleed: the approval path uses the left rail, the document
+          preview the right rail. */}
       {canCreate && !session._sim && (
         <div className="mb-4">
           <NewInvoice stores={dir.stores} users={dir.users} currentUser={session} />
         </div>
       )}
+
+      <div className="mx-auto max-w-6xl">
 
       {/* Finance gets two views; approvers get the simpler three-tab split.
           Finance and admin also get a Settings tab. */}
@@ -1860,6 +1913,7 @@ function App() {
         ))}
       </div>
       )}
+      </div>
     </div>
   );
 
