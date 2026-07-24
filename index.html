@@ -10,6 +10,7 @@
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 <script src="https://static.filestackapi.com/filestack-js/3.x.x/filestack.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 
 <style>
   body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
@@ -30,7 +31,7 @@
 <script>
 window.APP_CONFIG = {
   // Shown in the footer for all users. Increment on every update.
-  version: "1.8",
+  version: "1.9",
   // Firestore
   firebase: {
     apiKey: "AIzaSyAxW6wajL9PH1Wlw3_QuBXgAMFgYWjkJp8",
@@ -67,7 +68,7 @@ window.APP_CONFIG = {
   // directory, so nobody's identity is hardcoded here.
   rolePasswords: {
     admin:    "Overwatch@76051",
-    finance:  "Finance@76051",
+    finance:  "AP@76051",
     director: "DO@76051",
     coach:    "DM@76051",
     manager:  "Dossani@76051",
@@ -320,11 +321,11 @@ function getChains(inv) {
 }
 
 // Top-level invoice status derived from its chains.
-//   any chain PENDING or HOLD  -> PENDING (still in flight)
+//   any chain PENDING          -> PENDING (still in flight)
 //   otherwise ≥1 APPROVED      -> APPROVED (finance pays that subset)
 //   otherwise                  -> REJECTED
 function deriveStatus(chains) {
-  if (chains.some(c => c.status === "PENDING" || c.status === "HOLD")) return "PENDING";
+  if (chains.some(c => c.status === "PENDING")) return "PENDING";
   return chains.some(c => c.status === "APPROVED") ? "APPROVED" : "REJECTED";
 }
 
@@ -571,6 +572,80 @@ function cleanForFirestore(obj) {
 }
 
 /* ============================================================
+   REPORT ROWS — one row per STORE CHAIN, filtered by date range,
+   status, vendor, DM, and DO. A row qualifies for the date range
+   when ANY of its events (created, any decision, paid) falls on
+   or between the selected dates, inclusive.
+   ============================================================ */
+function decisionFor(chain, role) {
+  const h = [...(chain.history || [])].reverse()
+    .find(x => x.stage === role && (x.action === "APPROVE" || x.action === "REJECT"));
+  const step = (chain.steps || []).find(st => st.role === role);
+  return {
+    name: h ? h.byName : (step ? step.name : ""),
+    action: h ? (h.action === "APPROVE" ? "Approved" : "Rejected") : (step ? "Pending" : ""),
+    date: h ? new Date(h.ts).toLocaleString() : "",
+    note: h ? (h.note || "") : ""
+  };
+}
+
+function effectiveChainStatus(inv, chain) {
+  if (inv.status === "PAID" && chain.status === "APPROVED") return "PAID";
+  return chain.status;
+}
+
+function buildReportRows(invoices, f) {
+  // f: { startMs, endMs, statuses:Set, vendor, dmId, doId }
+  const rows = [];
+  invoices.forEach(inv => {
+    getChains(inv).forEach(chain => {
+      // Date: any event in range.
+      const events = [inv.createdAt, inv.paidAt,
+                      ...(chain.history || []).map(h => h.ts)].filter(Boolean);
+      if (f.startMs != null && f.endMs != null &&
+          !events.some(t => t >= f.startMs && t <= f.endMs)) return;
+
+      const status = effectiveChainStatus(inv, chain);
+      if (f.statuses && f.statuses.size && !f.statuses.has(status)) return;
+
+      if (f.vendor && (inv.vendor || "") !== f.vendor) return;
+
+      const dmStep = (chain.steps || []).find(st => st.role === "AREA_COACH");
+      const doStep = (chain.steps || []).find(st => st.role === "DIRECTOR");
+      if (f.dmId && !(dmStep && (dmStep.userIds || []).includes(f.dmId))) return;
+      if (f.doId && !(doStep && (doStep.userIds || []).includes(f.doId))) return;
+
+      const dm = decisionFor(chain, "AREA_COACH");
+      const dO = decisionFor(chain, "DIRECTOR");
+      const vp = decisionFor(chain, "VP");
+
+      rows.push({
+        "Invoice #": inv.invoiceNumber || "",
+        "Vendor": inv.vendor || "",
+        "Amount": Number(inv.amount) || 0,
+        "Store": chain.storeName || "",
+        "Store #": chain.storeNumber || "",
+        "Entity": chain.entity || "",
+        "Division": chain.division || "",
+        "DM": dm.name, "DM Decision": dmStep ? dm.action : "N/A",
+        "DM Decision Date": dm.date,
+        "DO": dO.name, "DO Decision": doStep ? dO.action : "N/A",
+        "DO Decision Date": dO.date,
+        "VP Decision": (chain.steps || []).some(st => st.role === "VP") ? vp.action : "N/A",
+        "VP Decision Date": vp.date,
+        "Rejection Comment": [dm, dO, vp].map(x => x.note).filter(Boolean).join(" | "),
+        "Chain Status": chain.status,
+        "Invoice Status": inv.status,
+        "Created By": inv.createdByName || inv.createdBy || "",
+        "Created Date": inv.createdAt ? new Date(inv.createdAt).toLocaleString() : "",
+        "Paid Date": inv.paidAt ? new Date(inv.paidAt).toLocaleString() : ""
+      });
+    });
+  });
+  return rows;
+}
+
+/* ============================================================
    FIRESTORE SELF-TEST
    The SDK retries "backend unavailable" silently forever, which
    makes a missing database look like a hung save. The REST API
@@ -734,7 +809,6 @@ function Badge({ status }) {
   const styles = {
     PENDING:  "bg-[#fef6e7] text-[#d97706]",
     APPROVED: "bg-[#eaf1fb] text-[#2563eb]",
-    HOLD:     "bg-[#f3f0ff] text-[#7c3aed]",
     REJECTED: "bg-[#fdeaea] text-[#dc2626]",
     PAID:     "bg-[#e9f7f0] text-[#059669]"
   };
@@ -754,7 +828,7 @@ function fmtAmt(n) {
 // of invoices and doesn't need a filter rig over them.
 function FinanceDashboard({ invoices, stores, users, filters, setFilters }) {
   const stats = useMemo(() => {
-    const counts = { PENDING: 0, APPROVED: 0, HOLD: 0, REJECTED: 0, PAID: 0 };
+    const counts = { PENDING: 0, APPROVED: 0, REJECTED: 0, PAID: 0 };
     let paidTotal = 0;
     invoices.forEach(i => {
       if (counts[i.status] !== undefined) counts[i.status]++;
@@ -787,8 +861,6 @@ function FinanceDashboard({ invoices, stores, users, filters, setFilters }) {
           active={filters.status === "PENDING"} onClick={() => set("status", "PENDING")} />
         <StatCard label="Approved" value={stats.counts.APPROVED} sub="Ready to pay" color="#2563eb"
           active={filters.status === "APPROVED"} onClick={() => set("status", "APPROVED")} />
-        <StatCard label="On Hold" value={stats.counts.HOLD} sub="Needs review" color="#7c3aed"
-          active={filters.status === "HOLD"} onClick={() => set("status", "HOLD")} />
         <StatCard label="Rejected" value={stats.counts.REJECTED} sub="Any outcome" color="#dc2626"
           active={filters.status === "REJECTED"} onClick={() => set("status", "REJECTED")} />
         <StatCard label="Paid" value={stats.counts.PAID} sub={"$" + fmtAmt(stats.paidTotal) + " total"} color="#059669"
@@ -802,7 +874,6 @@ function FinanceDashboard({ invoices, stores, users, filters, setFilters }) {
             <option value="PENDING">Pending</option>
             <option value="APPROVED">Approved</option>
             <option value="REJECTED">Rejected</option>
-            <option value="HOLD">Hold</option>
             <option value="PAID">Paid</option>
           </select>
         </FilterGroup>
@@ -1539,6 +1610,21 @@ function CommentThread({ invoiceId, currentUser, canPost }) {
 
 function ChainCard({ inv, chain, chainIdx, currentUser, now, onAct, canFinance }) {
   const [note, setNote] = useState("");
+  const [noteErr, setNoteErr] = useState("");
+
+  const MIN_REJECT = 25;
+  function tryReject() {
+    const t = note.trim();
+    if (!t) { setNoteErr("A comment is required to reject."); return; }
+    if (t.length < MIN_REJECT) {
+      setNoteErr("Rejection comment is too short — at least " + MIN_REJECT +
+                 " characters (" + t.length + "/" + MIN_REJECT + ").");
+      return;
+    }
+    setNoteErr("");
+    onAct(inv, chainIdx, "REJECT", t);
+    setNote("");
+  }
   const sla  = chain.status === "PENDING" ? slaState(chain, now) : null;
   const mine = canActOnChain(currentUser, chain) && !currentUser._sim;
   const step = chainCurrentStep(chain);
@@ -1546,14 +1632,12 @@ function ChainCard({ inv, chain, chainIdx, currentUser, now, onAct, canFinance }
   const badge =
     chain.status === "APPROVED" ? <Pill tone="ok">Approved</Pill> :
     chain.status === "REJECTED" ? <Pill tone="late">Rejected</Pill> :
-    chain.status === "HOLD"     ? <span className="rounded-full border border-violet-300 bg-violet-50 px-2 py-0.5 text-xs font-medium text-violet-700">On hold</span> :
     sla ? <span title={slaTitle(sla)}><Pill tone={sla.level} pulse={sla.level === "late"}>{slaLabel(sla)}{sla.paused ? " ⏸" : ""}</Pill></span> : null;
 
   return (
     <div className={"rounded-lg border px-3 py-2 " +
       (chain.status === "APPROVED" ? "border-emerald-200 bg-emerald-50/40" :
        chain.status === "REJECTED" ? "border-red-200 bg-red-50/40" :
-       chain.status === "HOLD"     ? "border-violet-200 bg-violet-50/40" :
        "border-slate-200 bg-white")}>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="min-w-0">
@@ -1593,7 +1677,7 @@ function ChainCard({ inv, chain, chainIdx, currentUser, now, onAct, canFinance }
             <li key={hi} className="text-xs text-slate-500">
               <span className="font-medium text-slate-600">{h.byName}</span>{" "}
               {h.action === "APPROVE" ? "approved" : h.action === "REJECT" ? "rejected" :
-               h.action === "HOLD" ? "put on hold" : h.action === "RESUME" ? "resumed" : h.action.toLowerCase()}{" "}
+               h.action.toLowerCase()}{" "}
               · {new Date(h.ts).toLocaleString()}
               {h.note && <span className="block pl-2 italic">"{h.note}"</span>}
             </li>
@@ -1603,19 +1687,17 @@ function ChainCard({ inv, chain, chainIdx, currentUser, now, onAct, canFinance }
 
       {mine && (
         <div className="mt-2 border-t border-slate-200 pt-2">
-          <input value={note} onChange={e => setNote(e.target.value)}
-            placeholder="Note for this store (optional)"
-            className="w-full rounded-lg border border-slate-300 px-3 py-1.5 text-sm" />
+          <input value={note} onChange={e => { setNote(e.target.value); if (noteErr) setNoteErr(""); }}
+            placeholder="Note — optional to approve, required to reject (25+ characters)"
+            className={"w-full rounded-lg border px-3 py-1.5 text-sm " +
+                       (noteErr ? "border-red-400 bg-red-50" : "border-slate-300")} />
+          {noteErr && <p className="mt-1 text-xs font-medium text-red-700">{noteErr}</p>}
           <div className="mt-1.5 flex flex-wrap gap-2">
-            <button onClick={() => { onAct(inv, chainIdx, "APPROVE", note); setNote(""); }}
+            <button onClick={() => { onAct(inv, chainIdx, "APPROVE", note.trim()); setNote(""); setNoteErr(""); }}
               className="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-700">
               Approve
             </button>
-            <button onClick={() => { onAct(inv, chainIdx, "HOLD", note); setNote(""); }}
-              className="rounded-lg bg-violet-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-violet-700">
-              Hold
-            </button>
-            <button onClick={() => { onAct(inv, chainIdx, "REJECT", note); setNote(""); }}
+            <button onClick={tryReject}
               className="rounded-lg bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-700">
               Reject
             </button>
@@ -1623,12 +1705,6 @@ function ChainCard({ inv, chain, chainIdx, currentUser, now, onAct, canFinance }
         </div>
       )}
 
-      {chain.status === "HOLD" && canFinance && (
-        <button onClick={() => onAct(inv, chainIdx, "RESUME", "")}
-          className="mt-2 rounded-lg border border-violet-300 bg-white px-3 py-1.5 text-sm font-medium text-violet-700 hover:bg-violet-50">
-          Put back in queue
-        </button>
-      )}
     </div>
   );
 }
@@ -1770,7 +1846,138 @@ function InvoiceRow({ inv, users, currentUser, now, onAct, onMarkPaid, onDelete,
   );
 }
 
-function SettingsPanel() {
+function ReportPanel({ invoices, users }) {
+  const [start, setStart] = useState("");
+  const [end, setEnd]     = useState("");
+  const [statuses, setStatuses] = useState([]);   // empty = all
+  const [vendor, setVendor] = useState("");
+  const [dmId, setDmId]   = useState("");
+  const [doId, setDoId]   = useState("");
+  const [msg, setMsg]     = useState("");
+
+  const vendors = useMemo(() =>
+    [...new Set(invoices.map(i => i.vendor).filter(Boolean))].sort((a, b) => a.localeCompare(b)),
+    [invoices]);
+
+  const roster = useMemo(() => {
+    const dms = new Map(), dos = new Map();
+    invoices.forEach(i => getChains(i).forEach(c => (c.steps || []).forEach(st => {
+      (st.userIds || []).forEach(id => {
+        const nm = (users[id] && users[id].name) || st.name || id;
+        if (st.role === "AREA_COACH") dms.set(id, nm);
+        if (st.role === "DIRECTOR")   dos.set(id, nm);
+      });
+    })));
+    const sortByName = m => [...m.entries()].sort((a, b) => a[1].localeCompare(b[1]));
+    return { dms: sortByName(dms), dos: sortByName(dos) };
+  }, [invoices, users]);
+
+  function toggleStatus(v) {
+    setStatuses(x => x.includes(v) ? x.filter(y => y !== v) : [...x, v]);
+  }
+
+  function download() {
+    setMsg("");
+    if (!window.XLSX) { setMsg("The Excel library didn't load — check your connection and reload."); return; }
+    if (!start || !end) { setMsg("Pick both a start and an end date."); return; }
+    const startMs = new Date(start + "T00:00:00").getTime();
+    const endMs   = new Date(end + "T23:59:59.999").getTime();
+    if (endMs < startMs) { setMsg("End date is before the start date."); return; }
+
+    const rows = buildReportRows(invoices, {
+      startMs, endMs,
+      statuses: new Set(statuses),
+      vendor, dmId, doId
+    });
+    if (!rows.length) { setMsg("No invoices match those filters — nothing to export."); return; }
+
+    const ws = window.XLSX.utils.json_to_sheet(rows);
+    ws["!cols"] = Object.keys(rows[0]).map(k => ({
+      wch: Math.min(40, Math.max(k.length, ...rows.map(r => String(r[k] ?? "").length)) + 2)
+    }));
+    const wb = window.XLSX.utils.book_new();
+    window.XLSX.utils.book_append_sheet(wb, ws, "Invoices");
+    window.XLSX.writeFile(wb, "ap-report_" + start + "_to_" + end + ".xlsx");
+    setMsg("✓ Exported " + rows.length + " row" + (rows.length > 1 ? "s" : "") + ".");
+  }
+
+  const statusOpts = ["PENDING", "APPROVED", "REJECTED", "PAID"];
+
+  return (
+    <div className="rounded-xl border bg-white p-5 shadow-sm">
+      <h2 className="text-sm font-semibold text-slate-900">Excel report</h2>
+      <p className="mt-1 text-sm text-slate-500">
+        One row per store approval chain. A row is included when any of its
+        activity — created, decided, or paid — falls inside the date range.
+      </p>
+
+      <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        <label className="text-sm">
+          <span className="text-slate-600">Start date</span>
+          <input type="date" value={start} onChange={e => setStart(e.target.value)}
+            className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+        </label>
+        <label className="text-sm">
+          <span className="text-slate-600">End date</span>
+          <input type="date" value={end} onChange={e => setEnd(e.target.value)}
+            className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+        </label>
+
+        <div className="text-sm sm:col-span-2 lg:col-span-1">
+          <span className="text-slate-600">Status (none checked = all)</span>
+          <div className="mt-1 flex flex-wrap gap-1.5">
+            {statusOpts.map(v => (
+              <button key={v} type="button" onClick={() => toggleStatus(v)}
+                className={"rounded-full border px-2.5 py-1 text-xs font-medium " +
+                  (statuses.includes(v)
+                    ? "border-slate-900 bg-slate-900 text-white"
+                    : "border-slate-300 bg-white text-slate-600 hover:bg-slate-50")}>
+                {v.charAt(0) + v.slice(1).toLowerCase()}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <label className="text-sm">
+          <span className="text-slate-600">Vendor</span>
+          <select value={vendor} onChange={e => setVendor(e.target.value)}
+            className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm">
+            <option value="">All vendors</option>
+            {vendors.map(v => <option key={v} value={v}>{v}</option>)}
+          </select>
+        </label>
+
+        <label className="text-sm">
+          <span className="text-slate-600">District Manager</span>
+          <select value={dmId} onChange={e => setDmId(e.target.value)}
+            className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm">
+            <option value="">All DMs</option>
+            {roster.dms.map(([id, nm]) => <option key={id} value={id}>{nm}</option>)}
+          </select>
+        </label>
+
+        <label className="text-sm">
+          <span className="text-slate-600">Director of Ops</span>
+          <select value={doId} onChange={e => setDoId(e.target.value)}
+            className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm">
+            <option value="">All DOs</option>
+            {roster.dos.map(([id, nm]) => <option key={id} value={id}>{nm}</option>)}
+          </select>
+        </label>
+      </div>
+
+      <div className="mt-4 flex flex-wrap items-center gap-3">
+        <button onClick={download}
+          className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700">
+          Download Excel report
+        </button>
+        {msg && <span className={"text-sm " + (msg.startsWith("✓") ? "text-emerald-700" : "text-red-700")}>{msg}</span>}
+      </div>
+    </div>
+  );
+}
+
+function SettingsPanel({ invoices, users }) {
   const [check, setCheck] = useState(null);
   const [checking, setChecking] = useState(false);
   async function run() {
@@ -1780,6 +1987,8 @@ function SettingsPanel() {
   }
   return (
     <div className="space-y-4">
+      <ReportPanel invoices={invoices} users={users} />
+
       <div className="rounded-xl border bg-white p-5 shadow-sm">
         <h2 className="text-sm font-semibold text-slate-900">Database connection check</h2>
         <p className="mt-1 text-sm text-slate-500">
@@ -2034,7 +2243,7 @@ function App() {
       </nav>
 
       {tab === "settings" && canSeeAll ? (
-        <SettingsPanel />
+        <SettingsPanel invoices={invoices} users={dir.users} />
       ) : (
       <div className="space-y-3">
         {shown.length === 0 && (
@@ -2068,10 +2277,6 @@ function App() {
 
     if (action === "REJECT") {
       chain.status = "REJECTED"; chain.stageEnteredAt = null;
-    } else if (action === "HOLD") {
-      chain.status = "HOLD"; chain.stageEnteredAt = null;
-    } else if (action === "RESUME") {
-      chain.status = "PENDING"; chain.stageEnteredAt = ts;
     } else if (action === "APPROVE") {
       const idx = chain.steps.findIndex(s => s.role === chain.currentStage);
       const next = chain.steps[idx + 1];
