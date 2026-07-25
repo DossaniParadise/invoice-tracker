@@ -45,7 +45,7 @@
 <script>
 window.APP_CONFIG = {
   // Shown in the footer for all users. Increment on every update.
-  version: "2.4",
+  version: "2.5",
   // Firestore
   firebase: {
     apiKey: "AIzaSyAxW6wajL9PH1Wlw3_QuBXgAMFgYWjkJp8",
@@ -332,6 +332,28 @@ function getChains(inv) {
     }];
   }
   return [];
+}
+
+/* ============================================================
+   COMMENT NOTIFICATIONS
+   Each comment appends {ts, by} to a small commentLog on the
+   invoice doc; commentReads holds each person's explicit
+   mark-read timestamp. Both PayMi and the repair app compute
+   unread identically from the invoice doc alone.
+   Audience: everyone named in a PENDING or REJECTED chain.
+   Your own comments never count as unread for you.
+   ============================================================ */
+function commentAudienceIncludes(userId, inv) {
+  return getChains(inv).some(c =>
+    (c.status === "PENDING" || c.status === "REJECTED") &&
+    (c.steps || []).some(st => (st.userIds || []).includes(userId)));
+}
+
+function unreadCommentsFor(userId, inv) {
+  if (!userId || !commentAudienceIncludes(userId, inv)) return 0;
+  const readAt = (inv.commentReads || {})[userId] || 0;
+  return (inv.commentLog || []).filter(e =>
+    e && e.by !== userId && (e.ts || 0) > readAt).length;
 }
 
 // Top-level invoice status derived from its chains.
@@ -742,14 +764,24 @@ const commentService = {
       err  => onErr && onErr(err));
   },
 
-  async add(invoiceId, author, text) {
+  async add(invoiceId, author, text, inv) {
+    const ts = Date.now();
     await window.FS.addDoc(this._col(invoiceId), {
       userId: author.id,
       userName: author.name,
       userRole: author.role,
       text: String(text).trim(),
-      ts: Date.now()
+      ts
     });
+    // Denormalize onto the invoice doc so notification counts are computable
+    // from a single document read (the repair app reads these over REST).
+    const log = [...((inv && inv.commentLog) || []), { ts, by: author.id }];
+    await invoiceService.update(invoiceId, { commentLog: log, lastCommentAt: ts });
+  },
+
+  async markRead(invoiceId, userId) {
+    await window.FS.updateDoc(window.FS.doc(window.FS.db, "invoices", invoiceId),
+      { ["commentReads." + userId]: Date.now() });
   }
 };
 
@@ -874,10 +906,10 @@ function FinanceDashboard({ invoices, stores, users, filters, setFilters, onStat
           active={!filters.status} onClick={() => set("status", "")} />
         <StatCard label="Pending" value={stats.counts.PENDING} sub="Awaiting action" color="#d97706"
           active={filters.status === "PENDING"} onClick={() => set("status", "PENDING")} />
-        <StatCard label="Approved" value={stats.counts.APPROVED} sub="Ready to pay" color="#2563eb"
-          active={filters.status === "APPROVED"} onClick={() => set("status", "APPROVED")} />
         <StatCard label="Rejected" value={stats.counts.REJECTED} sub="Any outcome" color="#dc2626"
           active={filters.status === "REJECTED"} onClick={() => set("status", "REJECTED")} />
+        <StatCard label="Approved" value={stats.counts.APPROVED} sub="Ready to pay" color="#2563eb"
+          active={filters.status === "APPROVED"} onClick={() => set("status", "APPROVED")} />
         <StatCard label="Paid" value={stats.counts.PAID} sub={"$" + fmtAmt(stats.paidTotal) + " total"} color="#059669"
           active={filters.status === "PAID"} onClick={() => set("status", "PAID")} />
       </div>
@@ -1498,7 +1530,7 @@ function NewInvoice({ stores, users, currentUser, knownVendors, onDone }) {
   );
 }
 
-function CommentThread({ invoiceId, currentUser, canPost }) {
+function CommentThread({ invoiceId, inv, currentUser, canPost }) {
   const [items, setItems] = useState(null);
   const [text, setText]   = useState("");
   const [busy, setBusy]   = useState(false);
@@ -1516,7 +1548,7 @@ function CommentThread({ invoiceId, currentUser, canPost }) {
     if (!t) return;
     setBusy(true); setErr("");
     try {
-      await commentService.add(invoiceId, currentUser, t);
+      await commentService.add(invoiceId, currentUser, t, inv);
       setText("");
     } catch (e) {
       setErr(e.message || "Couldn't post.");
@@ -1527,9 +1559,17 @@ function CommentThread({ invoiceId, currentUser, canPost }) {
 
   return (
     <div className="mt-3 border-t pt-3">
-      <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
-        Discussion{items && items.length ? " (" + items.length + ")" : ""}
-      </p>
+      <div className="flex items-center justify-between">
+        <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
+          Discussion{items && items.length ? " (" + items.length + ")" : ""}
+        </p>
+        {inv && !currentUser._sim && unreadCommentsFor(currentUser.id, inv) > 0 && (
+          <button onClick={() => commentService.markRead(invoiceId, currentUser.id)}
+            className="rounded-lg border border-sky-300 bg-sky-50 px-2.5 py-1 text-xs font-medium text-sky-800 hover:bg-sky-100">
+            ✓ Mark {unreadCommentsFor(currentUser.id, inv)} as read
+          </button>
+        )}
+      </div>
 
       {items === null && <p className="mt-2 text-sm text-slate-400">Loading…</p>}
       {items && items.length === 0 && (
@@ -1721,6 +1761,11 @@ function InvoiceRow({ inv, users, currentUser, now, onAct, onMarkPaid, onDelete,
               <Pill tone="ok">{approved} of {chains.length} approved</Pill>
             )}
             {inv.status === "REJECTED" && <Pill tone="late">All chains rejected</Pill>}
+            {!currentUser._sim && unreadCommentsFor(currentUser.id, inv) > 0 && (
+              <span className="rounded-full border border-sky-300 bg-sky-50 px-2 py-0.5 text-xs font-medium text-sky-800">
+                💬 {unreadCommentsFor(currentUser.id, inv)} new
+              </span>
+            )}
             {chains.length > 1 && inv.status === "PENDING" && (approved > 0 || rejected > 0) && (
               <span className="text-xs text-slate-500">
                 {approved} approved · {rejected} rejected · {chains.length - approved - rejected} pending
@@ -1813,7 +1858,7 @@ function InvoiceRow({ inv, users, currentUser, now, onAct, onMarkPaid, onDelete,
       )}
 
       {(open || mineAny) && (
-        <CommentThread invoiceId={inv.id} currentUser={currentUser}
+        <CommentThread invoiceId={inv.id} inv={inv} currentUser={currentUser}
                        canPost={!currentUser._sim} />
       )}
     </div>
@@ -2096,23 +2141,38 @@ function App() {
   const approverHub = useMemo(() => {
     if (!isApprover) return null;
     const counts = {};                     // storeId -> pending-on-me count
-    invoices.forEach(i => getChains(i).forEach(c => {
-      if (canActOnChain(session, c)) counts[c.storeId] = (counts[c.storeId] || 0) + 1;
-    }));
+    const cmts = {};                       // storeId -> unread comments
+    let cmtTotal = 0;
+    invoices.forEach(i => {
+      const unread = unreadCommentsFor(session.id, i);
+      const seen = new Set();
+      getChains(i).forEach(c => {
+        if (canActOnChain(session, c)) counts[c.storeId] = (counts[c.storeId] || 0) + 1;
+        // Attribute an invoice's unread comments to each of its stores once.
+        if (unread > 0 && !seen.has(c.storeId)) {
+          seen.add(c.storeId);
+          cmts[c.storeId] = (cmts[c.storeId] || 0) + unread;
+        }
+      });
+      cmtTotal += unread;
+    });
+    Object.keys(cmts).forEach(id => { counts[id] = counts[id] || 0; }); // ensure tile exists
     const assigned = dir.stores.filter(st =>
       (st.acIds || []).includes(session.id) || st.directorId === session.id);
     const byId = {};
     assigned.forEach(st => { byId[st.id] = { id: st.id, name: st.name,
       storeNumber: st.storeNumber, entity: st.entity, division: st.division,
-      count: counts[st.id] || 0 }; });
+      count: counts[st.id] || 0, comments: cmts[st.id] || 0 }; });
     Object.keys(counts).forEach(id => {
       if (byId[id]) return;
       const st = dir.stores.find(x => x.id === id);
       byId[id] = { id, name: st ? st.name : "(store)", storeNumber: st ? st.storeNumber : "",
-        entity: st ? st.entity : "", division: st ? st.division : "", count: counts[id] };
+        entity: st ? st.entity : "", division: st ? st.division : "",
+        count: counts[id], comments: cmts[id] || 0 };
     });
     const tiles = Object.values(byId).sort((a, b) => a.name.localeCompare(b.name));
-    return { tiles, total: Object.values(counts).reduce((n, x) => n + x, 0) };
+    return { tiles, total: Object.values(counts).reduce((n, x) => n + x, 0),
+             commentTotal: cmtTotal };
   }, [isApprover, invoices, dir.stores, session]);
   const isFinance = !!session && session.role === "FINANCE";
   const canSeeAll = isAdmin || isFinance;
@@ -2270,9 +2330,16 @@ function App() {
               <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-500">
                 Your stores
               </h2>
-              <span className="text-sm text-slate-500">
-                {approverHub.total === 0 ? "Nothing waiting on you"
-                  : approverHub.total + " invoice" + (approverHub.total > 1 ? "s" : "") + " pending your approval"}
+              <span className="text-right text-sm text-slate-500">
+                <span className="block">
+                  {approverHub.total === 0 ? "Nothing waiting on you"
+                    : "You have " + approverHub.total + " invoice" + (approverHub.total > 1 ? "s" : "") + " to review"}
+                </span>
+                {approverHub.commentTotal > 0 && (
+                  <span className="block font-medium text-sky-700">
+                    You have {approverHub.commentTotal} comment{approverHub.commentTotal > 1 ? "s" : ""} to view
+                  </span>
+                )}
               </span>
             </div>
             {approverHub.tiles.length === 0 ? (
@@ -2284,7 +2351,9 @@ function App() {
                 {approverHub.tiles.map(t => (
                   <button key={t.id} onClick={() => setApproverScreen(t.id)}
                     className={"rounded-xl border p-4 text-left shadow-sm transition hover:shadow " +
-                      (t.count > 0 ? "border-amber-300 bg-amber-50" : "border-slate-200 bg-white")}>
+                      (t.count > 0 ? "border-amber-300 bg-amber-50"
+                       : t.comments > 0 ? "border-sky-300 bg-sky-50"
+                       : "border-slate-200 bg-white")}>
                     <p className="truncate text-sm font-semibold text-slate-900">{t.name}</p>
                     <p className="truncate text-xs text-slate-500">
                       {[t.storeNumber, t.entity].filter(Boolean).join(" · ") || "—"}
@@ -2296,6 +2365,9 @@ function App() {
                     <p className="text-xs text-slate-500">
                       {t.count === 0 ? "All clear" : "invoice" + (t.count > 1 ? "s" : "") + " to review"}
                     </p>
+                    {t.comments > 0 && (
+                      <p className="mt-1 text-xs font-medium text-sky-700">💬 {t.comments} comment{t.comments > 1 ? "s" : ""}</p>
+                    )}
                   </button>
                 ))}
               </div>
