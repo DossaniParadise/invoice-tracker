@@ -45,7 +45,7 @@
 <script>
 window.APP_CONFIG = {
   // Shown in the footer for all users. Increment on every update.
-  version: "2.3",
+  version: "2.4",
   // Firestore
   firebase: {
     apiKey: "AIzaSyAxW6wajL9PH1Wlw3_QuBXgAMFgYWjkJp8",
@@ -836,7 +836,7 @@ function fmtAmt(n) {
 
 // Stat cards + filter bar. Finance and admin only — an area coach has a handful
 // of invoices and doesn't need a filter rig over them.
-function FinanceDashboard({ invoices, stores, users, filters, setFilters }) {
+function FinanceDashboard({ invoices, stores, users, filters, setFilters, onStatusNav }) {
   const stats = useMemo(() => {
     const counts = { PENDING: 0, APPROVED: 0, REJECTED: 0, PAID: 0 };
     let paidTotal = 0;
@@ -858,7 +858,12 @@ function FinanceDashboard({ invoices, stores, users, filters, setFilters }) {
     return [...seen.entries()].sort((a, b) => a[1].localeCompare(b[1]));
   }, [invoices, users]);
 
-  const set = (k, v) => setFilters(f => ({ ...f, [k]: v }));
+  const set = (k, v) => {
+    setFilters(f => ({ ...f, [k]: v }));
+    // Tapping a status card should land the person ON that list, not leave
+    // them wherever they were.
+    if (k === "status" && onStatusNav) onStatusNav();
+  };
   const sel = "bg-[#faf9f7] border border-[#e0dbd3] rounded-md px-2 py-1 text-xs outline-none";
   const active = filters.status || filters.division || filters.store || filters.approver || filters.q;
 
@@ -1956,8 +1961,6 @@ function SettingsPanel({ invoices, users }) {
   }
   return (
     <div className="space-y-4">
-      <ReportPanel invoices={invoices} users={users} />
-
       <div className="rounded-xl border bg-white p-5 shadow-sm">
         <h2 className="text-sm font-semibold text-slate-900">Database connection check</h2>
         <p className="mt-1 text-sm text-slate-500">
@@ -2013,6 +2016,7 @@ function App() {
   const [now, setNow]           = useState(Date.now());
   const [dbHealth, setDbHealth] = useState(null);   // Firestore self-test verdict
   const [approverScreen, setApproverScreen] = useState("hub");   // "hub" | storeId
+  const [financeScreen, setFinanceScreen] = useState("dashboard"); // "dashboard" | "new" | "report"
   const [filters, setFilters]   = useState({ status: "", division: "", store: "", approver: "", q: "" });
 
   // Directory load, then silently restore a saved session against the LIVE
@@ -2202,17 +2206,54 @@ function App() {
 
       <LateBanner invoices={pending} now={now} />
 
-      {canSeeAll && (
+      {/* Finance toolbar: big upload entry top-left, Excel report top-right.
+          The form and the report are their own screens now — the dashboard
+          stays a dashboard. */}
+      {canSeeAll && !session._sim && financeScreen === "dashboard" && (
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <button onClick={() => setFinanceScreen("new")}
+            className="flex items-center gap-2 rounded-xl bg-slate-900 px-5 py-3 text-base font-semibold text-white shadow-sm hover:bg-slate-800">
+            <span className="text-xl leading-none">＋</span> Upload New Invoice
+          </button>
+          <button onClick={() => setFinanceScreen("report")}
+            className="flex items-center gap-2 rounded-xl border border-emerald-300 bg-white px-4 py-2.5 text-sm font-medium text-emerald-800 shadow-sm hover:bg-emerald-50">
+            <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="2" y="2" width="20" height="20" rx="3" fill="#107c41"/>
+              <path d="M7.6 6.5h2.9l1.7 3.1 1.8-3.1h2.8l-3.1 5 3.3 6h-2.9l-2-3.6-2 3.6H7.2l3.4-6z" fill="#fff"/>
+            </svg>
+            Excel report
+          </button>
+        </div>
+      )}
+
+      {canSeeAll && financeScreen === "report" && (
+        <div>
+          <button onClick={() => setFinanceScreen("dashboard")}
+            className="mb-3 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50">
+            ← Back to dashboard
+          </button>
+          <ReportPanel invoices={invoices} users={dir.users} />
+        </div>
+      )}
+
+      {canSeeAll && financeScreen === "dashboard" && (
         <FinanceDashboard invoices={visible} stores={dir.stores} users={dir.users}
-                          filters={filters} setFilters={setFilters} />
+                          filters={filters} setFilters={setFilters}
+                          onStatusNav={() => setTab("all")} />
       )}
 
       </div>
 
-      {/* Full-bleed: the approval path uses the left rail, the document
-          preview the right rail. */}
-      {canCreate && !session._sim && (
+      {/* Full-bleed upload screen: the approval path uses the left rail, the
+          document preview the right rail. */}
+      {canCreate && !session._sim && financeScreen === "new" && (
         <div className="mb-4">
+          <div className="mx-auto mb-3 max-w-6xl">
+            <button onClick={() => setFinanceScreen("dashboard")}
+              className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50">
+              ← Back to dashboard
+            </button>
+          </div>
           <NewInvoice stores={dir.stores} users={dir.users} currentUser={session}
                       knownVendors={[...new Set(invoices.map(i => i.vendor).filter(Boolean))]} />
         </div>
@@ -2222,7 +2263,7 @@ function App() {
 
       {/* Approvers (DM / DO / VP) get a store-tile hub like the repair app;
           Finance/admin keep the tabbed dashboard. */}
-      {isApprover ? (
+      {(!canSeeAll || financeScreen === "dashboard") && (isApprover ? (
         approverScreen === "hub" ? (
           <div>
             <div className="mb-3 flex items-baseline justify-between">
@@ -2347,7 +2388,7 @@ function App() {
       </div>
       )}
       </div>
-      )}
+      ))}
       </div>
     </div>
   );
