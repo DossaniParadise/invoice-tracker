@@ -45,7 +45,7 @@
 <script>
 window.APP_CONFIG = {
   // Shown in the footer for all users. Increment on every update.
-  version: "2.8",
+  version: "2.9",
   // Firestore
   firebase: {
     apiKey: "AIzaSyAxW6wajL9PH1Wlw3_QuBXgAMFgYWjkJp8",
@@ -1645,6 +1645,17 @@ function NewInvoice({ stores, users, currentUser, knownVendors, vendorRules, onD
 }
 
 function CommentThread({ invoiceId, inv, currentUser, canPost }) {
+  // Seeing the conversation IS reading it: when this thread is on screen and
+  // holds unread comments, mark them read automatically. (Impersonated
+  // sessions never write, so viewing-as leaves the person's count intact.)
+  const unreadHere = inv && !currentUser._sim
+    ? unreadCommentsFor(currentUser.id, inv) : 0;
+  useEffect(() => {
+    if (unreadHere > 0) {
+      commentService.markRead(invoiceId, currentUser.id).catch(() => {});
+    }
+  }, [unreadHere, invoiceId]);
+
   const [items, setItems] = useState(null);
   const [text, setText]   = useState("");
   const [busy, setBusy]   = useState(false);
@@ -1673,17 +1684,9 @@ function CommentThread({ invoiceId, inv, currentUser, canPost }) {
 
   return (
     <div className="mt-3 border-t pt-3">
-      <div className="flex items-center justify-between">
-        <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
-          Conversation{items && items.length ? " (" + items.length + ")" : ""}
-        </p>
-        {inv && !currentUser._sim && unreadCommentsFor(currentUser.id, inv) > 0 && (
-          <button onClick={() => commentService.markRead(invoiceId, currentUser.id)}
-            className="rounded-lg border border-sky-300 bg-sky-50 px-2.5 py-1 text-xs font-medium text-sky-800 hover:bg-sky-100">
-            ✓ Mark {unreadCommentsFor(currentUser.id, inv)} as read
-          </button>
-        )}
-      </div>
+      <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
+        Conversation{items && items.length ? " (" + items.length + ")" : ""}
+      </p>
 
       {items === null && <p className="mt-2 text-sm text-slate-400">Loading…</p>}
       {items && items.length === 0 && (
@@ -2382,7 +2385,11 @@ function App() {
         entity: st ? st.entity : "", division: st ? st.division : "",
         count: counts[id], comments: cmts[id] || 0 };
     });
-    const tiles = Object.values(byId).sort((a, b) => a.name.localeCompare(b.name));
+    // Only stores that actually need attention: with dozens of stores under
+    // one DM, all-clear tiles are scroll noise.
+    const tiles = Object.values(byId)
+      .filter(t => t.count > 0 || t.comments > 0)
+      .sort((a, b) => a.name.localeCompare(b.name));
     return { tiles, total: Object.values(counts).reduce((n, x) => n + x, 0),
              commentTotal: cmtTotal };
   }, [isApprover, invoices, dir.stores, session]);
@@ -2557,7 +2564,7 @@ function App() {
             </div>
             {approverHub.tiles.length === 0 ? (
               <p className="rounded-xl border border-dashed bg-white p-8 text-center text-sm text-slate-500">
-                No stores are assigned to you in the directory.
+                ✅ All clear — no invoices or comments waiting at any of your stores.
               </p>
             ) : (
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
