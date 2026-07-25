@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="viewport" content="width=device-width, initial-scale=0.85, minimum-scale=0.5" />
 <title>DPM PayMi Invoice Tracker</title>
 
 <link rel="icon" type="image/png" href="favicon-96x96.png" sizes="96x96" />
@@ -26,6 +26,13 @@
   .sla-late  { background:#fef2f2; color:#991b1b; border-color:#fecaca; }
   @keyframes pulseLate { 0%,100%{opacity:1} 50%{opacity:.55} }
   .sla-late-pulse { animation: pulseLate 1.6s ease-in-out infinite; }
+  /* Document previews: desktop gets fixed heights; on mobile the frame spans
+     the full screen width and takes a paper-ish aspect so the page fits. */
+  .pdf-frame { width:100%; height:520px; }
+  .pdf-frame-tall { width:100%; height:75vh; min-height:560px; }
+  @media (max-width:1023px){
+    .pdf-frame, .pdf-frame-tall { height:calc(100vw * 1.2); min-height:0; max-height:80vh; }
+  }
 </style>
 </head>
 <body class="bg-slate-100">
@@ -38,7 +45,7 @@
 <script>
 window.APP_CONFIG = {
   // Shown in the footer for all users. Increment on every update.
-  version: "2.2",
+  version: "2.3",
   // Firestore
   firebase: {
     apiKey: "AIzaSyAxW6wajL9PH1Wlw3_QuBXgAMFgYWjkJp8",
@@ -545,18 +552,14 @@ function dayWord(n) { return n === 1 ? "day" : "days"; }
 // Human phrase for the SLA window, used in banners and tooltips.
 const SLA_PHRASE = CFG.slaDays + " business " + dayWord(CFG.slaDays);
 
+function fmtDueShort(d) {
+  return d.toLocaleString(undefined,
+    { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
 function slaLabel(s) {
   if (!s) return "";
-  if (s.level === "late") {
-    const over = s.usedDays - CFG.slaDays;
-    if (over < 1) return "Overdue";
-    const d = Math.floor(over);
-    return d + " " + dayWord(d) + " overdue";
-  }
-  // Round up so a partly-used day still reads as a day remaining, and never
-  // show "0 days left" while the invoice is still inside its window.
-  const left = Math.max(1, Math.ceil(s.remainingDays));
-  return left + " business " + dayWord(left) + " left";
+  if (s.level === "late") return "Overdue — was due " + fmtDueShort(s.dueAt);
+  return "Approval due by " + fmtDueShort(s.dueAt);
 }
 
 function slaTitle(s) {
@@ -1453,19 +1456,19 @@ function NewInvoice({ stores, users, currentUser, knownVendors, onDone }) {
       <div className="order-3 xl:col-start-3 xl:row-start-1">
         <div className="xl:sticky xl:top-4">
           {uploading ? (
-            <div className="flex h-[75vh] min-h-[560px] items-center justify-center rounded-xl border
+            <div className="pdf-frame-tall flex items-center justify-center rounded-xl border
                             border-slate-200 bg-slate-50">
               <p className="text-sm text-slate-500">Uploading…</p>
             </div>
           ) : file ? (
             <div className="overflow-hidden rounded-xl border border-slate-200 shadow-sm">
               {/\.(png|jpe?g|gif|webp)(\?|$)/i.test(file.url) ? (
-                <div className="h-[75vh] min-h-[560px] overflow-y-auto bg-slate-100">
+                <div className="pdf-frame-tall overflow-y-auto bg-slate-100">
                   <img src={file.url} alt={file.name} className="w-full" />
                 </div>
               ) : (
                 <iframe src={file.url} title="Invoice preview"
-                        className="h-[75vh] min-h-[560px] w-full bg-slate-100" />
+                        className="pdf-frame-tall bg-slate-100" />
               )}
               <div className="flex items-center justify-between border-t bg-slate-50 px-3 py-1.5">
                 <span className="truncate text-xs text-slate-500">{file.name}</span>
@@ -1476,7 +1479,7 @@ function NewInvoice({ stores, users, currentUser, knownVendors, onDone }) {
               </div>
             </div>
           ) : (
-            <div className="flex h-[75vh] min-h-[560px] flex-col items-center justify-center gap-2
+            <div className="pdf-frame-tall flex flex-col items-center justify-center gap-2
                             rounded-xl border-2 border-dashed border-slate-200 bg-slate-50/50">
               <p className="text-sm text-slate-400">No document yet</p>
               <p className="px-6 text-center text-xs text-slate-400">
@@ -1675,7 +1678,7 @@ function ChainCard({ inv, chain, chainIdx, currentUser, now, onAct, canFinance }
   );
 }
 
-function InvoiceRow({ inv, users, currentUser, now, onAct, onMarkPaid, onDelete, canFinance }) {
+function InvoiceRow({ inv, users, currentUser, now, onAct, onMarkPaid, onDelete, canFinance, compact }) {
   const [open, setOpen] = useState(false);
   const chains = getChains(inv);
   const mineAny = canUserAct(currentUser, inv) && !currentUser._sim;
@@ -1690,7 +1693,7 @@ function InvoiceRow({ inv, users, currentUser, now, onAct, onMarkPaid, onDelete,
     .map(c => slaState(c, now)).filter(Boolean)
     .sort((a, b) => a.remainingH - b.remainingH)[0] || null;
 
-  const showChains = open || mineAny;   // auto-expand when it is your turn
+  const showChains = open || (mineAny && !compact);   // auto-expand when it is your turn, unless the list is long
 
   return (
     <div className="rounded-xl border bg-white p-4 shadow-sm">
@@ -1735,7 +1738,7 @@ function InvoiceRow({ inv, users, currentUser, now, onAct, onMarkPaid, onDelete,
           )}
           <button onClick={() => setOpen(o => !o)}
             className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-50">
-            {showChains ? "Hide" : "Details"}
+            {showChains ? "Hide" : compact && mineAny ? "Expand to review" : "Details"}
           </button>
           {canFinance && (
             <button onClick={() => onDelete(inv)}
@@ -1768,12 +1771,12 @@ function InvoiceRow({ inv, users, currentUser, now, onAct, onMarkPaid, onDelete,
             <div className="lg:sticky lg:top-4 lg:self-start">
               <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
                 {/\.(png|jpe?g|gif|webp)(\?|$)/i.test(inv.fileUrl) ? (
-                  <div className="max-h-[520px] overflow-y-auto bg-slate-100">
+                  <div className="pdf-frame overflow-y-auto bg-slate-100">
                     <img src={inv.fileUrl} alt={inv.fileName || "invoice"} className="w-full" />
                   </div>
                 ) : (
                   <iframe src={inv.fileUrl} title={inv.fileName || "invoice preview"}
-                          className="h-[520px] w-full bg-slate-100" />
+                          className="pdf-frame bg-slate-100" />
                 )}
                 <div className="flex items-center justify-between border-t bg-slate-50 px-3 py-1.5">
                   <span className="truncate text-xs text-slate-500">{inv.fileName || "Attached file"}</span>
@@ -2009,6 +2012,7 @@ function App() {
   const [err, setErr]           = useState("");
   const [now, setNow]           = useState(Date.now());
   const [dbHealth, setDbHealth] = useState(null);   // Firestore self-test verdict
+  const [approverScreen, setApproverScreen] = useState("hub");   // "hub" | storeId
   const [filters, setFilters]   = useState({ status: "", division: "", store: "", approver: "", q: "" });
 
   // Directory load, then silently restore a saved session against the LIVE
@@ -2079,6 +2083,33 @@ function App() {
   // number of hooks on every render, so a useMemo placed after the loading/login
   // returns would run only once a session exists and crash with error #310.
   const isAdmin   = !!session && session.role === "ADMIN";
+  const isApprover = !!session && (session.role === "AREA_COACH" || session.role === "DIRECTOR");
+
+  // Approver hub: their stores as tiles with pending-on-them counts — the same
+  // pattern as the repair app. Tiles are the union of their ASSIGNED stores
+  // (even when all clear) and any store whose chain is waiting on them (covers
+  // the VP stage on stores that aren't "theirs").
+  const approverHub = useMemo(() => {
+    if (!isApprover) return null;
+    const counts = {};                     // storeId -> pending-on-me count
+    invoices.forEach(i => getChains(i).forEach(c => {
+      if (canActOnChain(session, c)) counts[c.storeId] = (counts[c.storeId] || 0) + 1;
+    }));
+    const assigned = dir.stores.filter(st =>
+      (st.acIds || []).includes(session.id) || st.directorId === session.id);
+    const byId = {};
+    assigned.forEach(st => { byId[st.id] = { id: st.id, name: st.name,
+      storeNumber: st.storeNumber, entity: st.entity, division: st.division,
+      count: counts[st.id] || 0 }; });
+    Object.keys(counts).forEach(id => {
+      if (byId[id]) return;
+      const st = dir.stores.find(x => x.id === id);
+      byId[id] = { id, name: st ? st.name : "(store)", storeNumber: st ? st.storeNumber : "",
+        entity: st ? st.entity : "", division: st ? st.division : "", count: counts[id] };
+    });
+    const tiles = Object.values(byId).sort((a, b) => a.name.localeCompare(b.name));
+    return { tiles, total: Object.values(counts).reduce((n, x) => n + x, 0) };
+  }, [isApprover, invoices, dir.stores, session]);
   const isFinance = !!session && session.role === "FINANCE";
   const canSeeAll = isAdmin || isFinance;
 
@@ -2189,8 +2220,99 @@ function App() {
 
       <div className="mx-auto max-w-6xl">
 
-      {/* Finance gets two views; approvers get the simpler three-tab split.
-          Finance and admin also get a Settings tab. */}
+      {/* Approvers (DM / DO / VP) get a store-tile hub like the repair app;
+          Finance/admin keep the tabbed dashboard. */}
+      {isApprover ? (
+        approverScreen === "hub" ? (
+          <div>
+            <div className="mb-3 flex items-baseline justify-between">
+              <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-500">
+                Your stores
+              </h2>
+              <span className="text-sm text-slate-500">
+                {approverHub.total === 0 ? "Nothing waiting on you"
+                  : approverHub.total + " invoice" + (approverHub.total > 1 ? "s" : "") + " pending your approval"}
+              </span>
+            </div>
+            {approverHub.tiles.length === 0 ? (
+              <p className="rounded-xl border border-dashed bg-white p-8 text-center text-sm text-slate-500">
+                No stores are assigned to you in the directory.
+              </p>
+            ) : (
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+                {approverHub.tiles.map(t => (
+                  <button key={t.id} onClick={() => setApproverScreen(t.id)}
+                    className={"rounded-xl border p-4 text-left shadow-sm transition hover:shadow " +
+                      (t.count > 0 ? "border-amber-300 bg-amber-50" : "border-slate-200 bg-white")}>
+                    <p className="truncate text-sm font-semibold text-slate-900">{t.name}</p>
+                    <p className="truncate text-xs text-slate-500">
+                      {[t.storeNumber, t.entity].filter(Boolean).join(" · ") || "—"}
+                    </p>
+                    <p className={"mt-3 text-2xl font-bold " +
+                        (t.count > 0 ? "text-amber-700" : "text-slate-300")}>
+                      {t.count}
+                    </p>
+                    <p className="text-xs text-slate-500">
+                      {t.count === 0 ? "All clear" : "invoice" + (t.count > 1 ? "s" : "") + " to review"}
+                    </p>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        ) : (
+          (() => {
+            const st = approverHub.tiles.find(t => t.id === approverScreen) ||
+                       { id: approverScreen, name: "(store)", count: 0 };
+            const storeInvs = visible.filter(i =>
+              getChains(i).some(c => c.storeId === approverScreen));
+            const needsMe = storeInvs.filter(i =>
+              getChains(i).some(c => c.storeId === approverScreen && canActOnChain(session, c)));
+            const others = storeInvs.filter(i => !needsMe.includes(i));
+            return (
+              <div>
+                <button onClick={() => setApproverScreen("hub")}
+                  className="mb-3 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50">
+                  ← All stores
+                </button>
+                <h2 className="mb-3 text-base font-semibold text-slate-900">{st.name}</h2>
+
+                <p className="mb-2 text-xs font-medium uppercase tracking-wide text-slate-500">
+                  Needs you · {needsMe.length}
+                </p>
+                <div className="space-y-3">
+                  {needsMe.length === 0 && (
+                    <p className="rounded-xl border border-dashed bg-white p-6 text-center text-sm text-slate-500">
+                      Nothing waiting on you at this store.
+                    </p>
+                  )}
+                  {needsMe.map(inv => (
+                    <InvoiceRow key={inv.id} inv={inv} users={dir.users} currentUser={session}
+                                now={now} onAct={act} onMarkPaid={markPaid} onDelete={deleteInvoice}
+                                canFinance={false} compact={needsMe.length > 1} />
+                  ))}
+                </div>
+
+                {others.length > 0 && (
+                  <>
+                    <p className="mb-2 mt-6 text-xs font-medium uppercase tracking-wide text-slate-500">
+                      Other invoices at this store · {others.length}
+                    </p>
+                    <div className="space-y-3">
+                      {others.map(inv => (
+                        <InvoiceRow key={inv.id} inv={inv} users={dir.users} currentUser={session}
+                                    now={now} onAct={act} onMarkPaid={markPaid} onDelete={deleteInvoice}
+                                    canFinance={false} compact={true} />
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
+            );
+          })()
+        )
+      ) : (
+      <div>
       <nav className="mb-3 flex gap-1 rounded-lg bg-slate-200 p-1 text-sm">
         {(canSeeAll
           ? [["inbox", "Needs me (" + mine.length + ")"],
@@ -2222,6 +2344,8 @@ function App() {
                       now={now} onAct={act} onMarkPaid={markPaid} onDelete={deleteInvoice}
                       canFinance={canSeeAll && !session._sim} />
         ))}
+      </div>
+      )}
       </div>
       )}
       </div>
