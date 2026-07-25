@@ -45,7 +45,7 @@
 <script>
 window.APP_CONFIG = {
   // Shown in the footer for all users. Increment on every update.
-  version: "2.6",
+  version: "2.7",
   // Firestore
   firebase: {
     apiKey: "AIzaSyAxW6wajL9PH1Wlw3_QuBXgAMFgYWjkJp8",
@@ -85,12 +85,25 @@ window.APP_CONFIG = {
     finance:  "AP@76051",
     director: "DO@76051",
     coach:    "DM@76051",
+    rate:     "Rate@76051",
     manager:  "Dossani@76051",
     tech:     "Repair@76051"
   },
 
   // Full admin view + can impersonate anyone.
   adminEmails: ["itsupport@dossaniparadise.com"],
+
+  // --- Rate verification -----------------------------------------------------
+  // Second approver between the DM and the DO, asked "is this rate correct?".
+  // Which reviewer (if any) depends on the VENDOR — managed in Settings and
+  // stored in Firestore (config/vendorRules). Unknown vendors default to
+  // Rahim; AWT and Rheagl are seeded to IT until Settings says otherwise.
+  rateReviewers: {
+    IT:    { id: "rate:it",    email: "itsupport@dossaniparadise.com", name: "IT Support" },
+    RAHIM: { id: "rate:rahim", email: "rahim@dossaniparadise.com",     name: "Rahim" }
+  },
+  vendorRuleSeeds: { "awt": "IT", "rheagl services company": "IT" },
+  vendorRuleDefault: "RAHIM",
 
   // Finance / AP team. These people are NOT in the alignment directory yet.
   // When they are added, delete them here and they will resolve automatically —
@@ -128,7 +141,7 @@ window.APP_CONFIG = {
 import { initializeApp }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import {
-  initializeFirestore, collection, doc, addDoc, updateDoc, deleteDoc,
+  initializeFirestore, collection, doc, addDoc, updateDoc, deleteDoc, setDoc,
   onSnapshot, query, orderBy, serverTimestamp
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
@@ -140,7 +153,7 @@ const db  = initializeFirestore(app, { experimentalAutoDetectLongPolling: true }
 
 // Exposed for the Babel-compiled script below (module scope is isolated).
 window.FS = {
-  db, collection, doc, addDoc, updateDoc, deleteDoc,
+  db, collection, doc, addDoc, updateDoc, deleteDoc, setDoc,
   onSnapshot, query, orderBy, serverTimestamp
 };
 window.dispatchEvent(new Event("firebase-ready"));
@@ -155,7 +168,8 @@ const CFG = window.APP_CONFIG;
 // the org now calls this role District Manager.
 const ROLE_LABELS = {
   ADMIN: "Admin", FINANCE: "Finance", DIRECTOR: "Director of Ops",
-  AREA_COACH: "District Manager", VP: "VP of Ops", MANAGER: "Store Manager"
+  AREA_COACH: "District Manager", VP: "VP of Ops", MANAGER: "Store Manager",
+  RATE_REVIEWER: "Rate Reviewer", RATE_REVIEW: "Rate Verification"
 };
 function roleLabel(r) { return ROLE_LABELS[r] || (r || "").replace(/_/g, " "); }
 
@@ -254,8 +268,31 @@ const directoryService = {
    approve some stores and reject others.
    ============================================================ */
 
-// Steps for ONE store. Identical to the original single-store rules.
-function buildStoreChainSteps(store, amount, users) {
+/* Vendor -> rate-review category: "IT" | "RAHIM" | "NONE".
+   Firestore doc (config/vendorRules) wins; then the config seeds; then the
+   default. Vendor names compare case-insensitively, trimmed. */
+function vendorRuleFor(vendor, rulesDoc) {
+  const v = (vendor || "").trim().toLowerCase();
+  if (!v) return CFG.vendorRuleDefault;
+  const fromDoc = rulesDoc && rulesDoc.rules && rulesDoc.rules[v];
+  if (fromDoc) return fromDoc;
+  if (CFG.vendorRuleSeeds[v]) return CFG.vendorRuleSeeds[v];
+  return (rulesDoc && rulesDoc.default) || CFG.vendorRuleDefault;
+}
+
+// Who may sign the rate step. IT can act from the dedicated rate login OR
+// their existing admin session (admin ids are "admin:<email>").
+function rateReviewerIds(kind) {
+  const r = CFG.rateReviewers[kind];
+  if (!r) return null;
+  const ids = [r.id];
+  if (CFG.adminEmails.map(e => e.toLowerCase()).includes(r.email.toLowerCase()))
+    ids.push("admin:" + r.email.toLowerCase());
+  return { ids, name: r.name };
+}
+
+// Steps for ONE store. DM -> (rate check) -> DO -> VP when the total demands.
+function buildStoreChainSteps(store, amount, users, vendorRule) {
   const steps = [];
   const nameOf = id => (users[id] && users[id].name) || "Unknown";
 
@@ -264,7 +301,19 @@ function buildStoreChainSteps(store, amount, users) {
     steps.push({
       role: "AREA_COACH", label: "District Manager (DM)",
       userIds: acIds, userId: acIds[0],
-      name: acIds.map(nameOf).join(" or ")
+      name: acIds.map(nameOf).join(" or "),
+      note: "Has this work been completed?"
+    });
+  }
+
+  // Rate verification: vendor-dependent second signer, before the DO.
+  const reviewer = rateReviewerIds(vendorRule);
+  if (reviewer) {
+    steps.push({
+      role: "RATE_REVIEW", label: "Rate Verification",
+      userIds: reviewer.ids, userId: reviewer.ids[0],
+      name: reviewer.name,
+      note: "Is this rate correct?"
     });
   }
 
@@ -296,9 +345,9 @@ function buildStoreChainSteps(store, amount, users) {
 }
 
 // Full chain objects for an invoice.
-function buildChains(stores, amount, users, now) {
+function buildChains(stores, amount, users, now, vendorRule) {
   return stores.map(st => {
-    const steps = buildStoreChainSteps(st, amount, users);
+    const steps = buildStoreChainSteps(st, amount, users, vendorRule);
     return {
       storeId: st.id,
       storeName: st.name,
@@ -401,6 +450,15 @@ function resolveSession(email, pw, dir) {
   if (CFG.adminEmails.map(e => e.toLowerCase()).includes(lc)) {
     if (pw !== P.admin) return { error: "That password doesn't match the admin role." };
     return { id: "admin:" + lc, email: lc, name: "IT Support", role: "ADMIN", scope: "all" };
+  }
+
+  // 1b. Rahim — rate reviewer on most vendors. Same password as admin per
+  //     request, but a separate, non-admin session whose id matches the id
+  //     that chains embed for the rate step.
+  if (lc === CFG.rateReviewers.RAHIM.email.toLowerCase()) {
+    if (pw !== P.admin) return { error: "That password doesn't match this role." };
+    return { id: CFG.rateReviewers.RAHIM.id, email: lc,
+             name: CFG.rateReviewers.RAHIM.name, role: "RATE_REVIEWER", scope: "self" };
   }
 
   // 2. Finance / AP. Directory first so that once these people are added
@@ -648,6 +706,7 @@ function buildReportRows(invoices, f) {
       if (f.doId && !(doStep && (doStep.userIds || []).includes(f.doId))) return;
 
       const dm = decisionFor(chain, "AREA_COACH");
+      const rc = decisionFor(chain, "RATE_REVIEW");
       const dO = decisionFor(chain, "DIRECTOR");
       const vp = decisionFor(chain, "VP");
 
@@ -661,11 +720,14 @@ function buildReportRows(invoices, f) {
         "Division": chain.division || "",
         "DM": dm.name, "DM Decision": dmStep ? dm.action : "N/A",
         "DM Decision Date": dm.date,
+        "Rate Approver": rc.name,
+        "Rate Decision": (chain.steps || []).some(st => st.role === "RATE_REVIEW") ? rc.action : "N/A",
+        "Rate Decision Date": rc.date,
         "DO": dO.name, "DO Decision": doStep ? dO.action : "N/A",
         "DO Decision Date": dO.date,
         "VP Decision": (chain.steps || []).some(st => st.role === "VP") ? vp.action : "N/A",
         "VP Decision Date": vp.date,
-        "Rejection Comment": [dm, dO, vp].map(x => x.note).filter(Boolean).join(" | "),
+        "Rejection Comment": [dm, rc, dO, vp].map(x => x.note).filter(Boolean).join(" | "),
         "Chain Status": chain.status,
         "Invoice Status": inv.status,
         "Created By": inv.createdByName || inv.createdBy || "",
@@ -712,6 +774,22 @@ async function probeFirestore() {
         "or ad-blocker is blocking it. (" + (e.message || "network error") + ")" };
   }
 }
+
+const VENDOR_RULES_DOC = "_config_vendorRules";
+
+const vendorRulesService = {
+  async save(rules, user) {
+    await window.FS.setDoc(window.FS.doc(window.FS.db, "invoices", VENDOR_RULES_DOC), {
+      _config: true,
+      rules: rules || {},
+      // createdAt required: the main subscription orders by createdAt and
+      // Firestore drops docs missing the field. 0 sorts it harmlessly last.
+      createdAt: 0,
+      updatedAt: Date.now(),
+      updatedBy: user ? user.name : ""
+    });
+  }
+};
 
 const invoiceService = {
   _col() { return window.FS.collection(window.FS.db, "invoices"); },
@@ -1232,7 +1310,7 @@ function StorePicker({ stores, selectedIds, onChange }) {
   );
 }
 
-function NewInvoice({ stores, users, currentUser, knownVendors, onDone }) {
+function NewInvoice({ stores, users, currentUser, knownVendors, vendorRules, onDone }) {
   const fs = useFilestack();
   const [storeIds, setStoreIds] = useState([]);
   const [vendor, setVendor]   = useState("");
@@ -1266,7 +1344,16 @@ function NewInvoice({ stores, users, currentUser, knownVendors, onDone }) {
 
   const selStores = stores.filter(s => storeIds.includes(s.id));
   const amt   = parseFloat(amount) || 0;
-  const previewChains = selStores.length ? buildChains(selStores, amt, users, Date.now()) : [];
+
+  // Second approver: the vendor rule decides, and finance can override it for
+  // THIS invoice from the path rail. Changing the vendor resets the override
+  // so a stale choice never sticks to the wrong vendor.
+  const [rateOverride, setRateOverride] = useState(null);   // null = follow rule
+  useEffect(() => { setRateOverride(null); }, [vendor]);
+  const rateRule = rateOverride || vendorRuleFor(vendor, { rules: vendorRules });
+
+  const previewChains = selStores.length
+    ? buildChains(selStores, amt, users, Date.now(), rateRule) : [];
 
   function pickFile() {
     setErr("");
@@ -1303,7 +1390,7 @@ function NewInvoice({ stores, users, currentUser, knownVendors, onDone }) {
     if (!(amt > 0))        return setErr("Enter an amount.");
 
     const now = Date.now();
-    const chains = buildChains(selStores, amt, users, now);
+    const chains = buildChains(selStores, amt, users, now, rateRule);
     if (chains.every(c => !c.steps.length))
       return setErr("No approvers found for these stores — check the directory.");
 
@@ -1363,6 +1450,30 @@ function NewInvoice({ stores, users, currentUser, knownVendors, onDone }) {
           <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-500">
             Approval path
           </h3>
+          <div className="mt-3 rounded-lg bg-slate-50 p-3">
+            <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
+              Second approver (after DM)
+            </p>
+            <div className="mt-1.5 flex flex-wrap gap-1.5">
+              {[["NONE", "None"], ["IT", "IT Support"], ["RAHIM", "Rahim"]].map(([v, lbl]) => (
+                <button key={v} type="button" onClick={() => setRateOverride(v)}
+                  className={"rounded-full border px-2.5 py-1 text-xs font-medium " +
+                    (rateRule === v
+                      ? "border-slate-900 bg-slate-900 text-white"
+                      : "border-slate-300 bg-white text-slate-600 hover:bg-slate-100")}>
+                  {lbl}
+                </button>
+              ))}
+            </div>
+            <p className="mt-1.5 text-xs text-slate-400">
+              {rateOverride
+                ? "Overridden for this invoice only."
+                : vendor.trim()
+                  ? "From the vendor rule for \u201C" + vendor.trim() + "\u201D. Tap to override."
+                  : "Default until a vendor is entered. Vendor rules live in Settings."}
+            </p>
+          </div>
+
           {selStores.length === 0 ? (
             <p className="mt-3 text-sm text-slate-400">
               Pick a store and the route will map out here — who signs, in what
@@ -1388,6 +1499,7 @@ function NewInvoice({ stores, users, currentUser, knownVendors, onDone }) {
                             <div>
                               <p className="text-base font-medium text-slate-900">{s.name}</p>
                               <p className="text-sm text-slate-500">{s.label}</p>
+                              {s.note && <p className="text-xs italic text-slate-400">"{s.note}"</p>}
                             </div>
                           </div>
                           <div className="ml-3.5 border-l-2 border-slate-200 py-1.5 pl-5">
@@ -1674,6 +1786,7 @@ function ChainCard({ inv, chain, chainIdx, currentUser, now, onAct, canFinance }
       {chain.status === "PENDING" && step && (
         <p className="mt-1 text-xs text-slate-600">
           Waiting on <span className="font-medium">{step.label}</span> — {step.name}
+          {step.note && <span className="text-slate-400"> · "{step.note}"</span>}
         </p>
       )}
 
@@ -2003,7 +2116,90 @@ function ReportPanel({ invoices, users }) {
   );
 }
 
-function SettingsPanel({ invoices, users }) {
+function VendorRoutingPanel({ invoices, vendorRules, currentUser }) {
+  const [draft, setDraft] = useState(null);   // local edits until Save
+  const [newVendor, setNewVendor] = useState("");
+  const [msg, setMsg] = useState("");
+  const rules = draft || vendorRules || {};
+
+  const vendors = useMemo(() => {
+    const set = new Map();
+    Object.keys(CFG.vendorRuleSeeds).forEach(v => set.set(v, v.toUpperCase() === "AWT" ? "AWT" : v));
+    (invoices || []).forEach(i => {
+      const v = (i.vendor || "").trim();
+      if (v) set.set(v.toLowerCase(), v);
+    });
+    Object.keys(rules).forEach(k => { if (!set.has(k)) set.set(k, k); });
+    return [...set.entries()].sort((a, b) => a[1].localeCompare(b[1]));
+  }, [invoices, rules]);
+
+  function effective(key) { return vendorRuleFor(key, { rules }); }
+  function setRule(key, v) {
+    setMsg("");
+    setDraft({ ...rules, [key]: v });
+  }
+  function addVendor() {
+    const k = newVendor.trim().toLowerCase();
+    if (!k) return;
+    setDraft({ ...rules, [k]: "RAHIM" });
+    setNewVendor("");
+  }
+  async function save() {
+    try {
+      await vendorRulesService.save(rules, currentUser);
+      setDraft(null);
+      setMsg("✓ Saved — applies to invoices created from now on.");
+    } catch (e) { setMsg("Couldn't save: " + (e.message || "error")); }
+  }
+
+  return (
+    <div className="rounded-xl border bg-white p-5 shadow-sm">
+      <h2 className="text-sm font-semibold text-slate-900">Vendor routing — second approver</h2>
+      <p className="mt-1 text-sm text-slate-500">
+        Who checks the rate after the DM confirms the work. Unlisted vendors
+        default to Rahim; AWT and Rheagl Services Company default to IT.
+        Changes affect newly created invoices only.
+      </p>
+
+      <div className="mt-4 max-h-80 space-y-1 overflow-y-auto pr-1">
+        {vendors.map(([key, label]) => (
+          <div key={key} className="flex items-center justify-between gap-3 rounded-lg bg-slate-50 px-3 py-2">
+            <span className="min-w-0 truncate text-sm text-slate-800">{label}</span>
+            <div className="flex shrink-0 gap-1">
+              {[["NONE", "None"], ["IT", "IT"], ["RAHIM", "Rahim"]].map(([v, lbl]) => (
+                <button key={v} type="button" onClick={() => setRule(key, v)}
+                  className={"rounded-full border px-2.5 py-0.5 text-xs font-medium " +
+                    (effective(key) === v
+                      ? "border-slate-900 bg-slate-900 text-white"
+                      : "border-slate-300 bg-white text-slate-600 hover:bg-slate-100")}>
+                  {lbl}
+                </button>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <input value={newVendor} onChange={e => setNewVendor(e.target.value)}
+          onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); addVendor(); } }}
+          placeholder="Add a vendor…"
+          className="w-56 rounded-lg border border-slate-300 px-3 py-1.5 text-sm" />
+        <button type="button" onClick={addVendor}
+          className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-50">
+          Add
+        </button>
+        <button type="button" onClick={save} disabled={!draft}
+          className="rounded-lg bg-slate-900 px-4 py-1.5 text-sm font-medium text-white disabled:opacity-40">
+          Save changes
+        </button>
+        {msg && <span className={"text-sm " + (msg.startsWith("✓") ? "text-emerald-700" : "text-red-700")}>{msg}</span>}
+      </div>
+    </div>
+  );
+}
+
+function SettingsPanel({ invoices, users, vendorRules, currentUser }) {
   const [check, setCheck] = useState(null);
   const [checking, setChecking] = useState(false);
   async function run() {
@@ -2013,6 +2209,8 @@ function SettingsPanel({ invoices, users }) {
   }
   return (
     <div className="space-y-4">
+      <VendorRoutingPanel invoices={invoices} vendorRules={vendorRules} currentUser={currentUser} />
+
       <div className="rounded-xl border bg-white p-5 shadow-sm">
         <h2 className="text-sm font-semibold text-slate-900">Database connection check</h2>
         <p className="mt-1 text-sm text-slate-500">
@@ -2069,6 +2267,7 @@ function App() {
   const [dbHealth, setDbHealth] = useState(null);   // Firestore self-test verdict
   const [approverScreen, setApproverScreen] = useState("hub");   // "hub" | storeId
   const [financeScreen, setFinanceScreen] = useState("dashboard"); // "dashboard" | "new" | "report"
+  const [vendorRules, setVendorRules] = useState({});   // vendor -> "NONE"|"IT"|"RAHIM"
   const [filters, setFilters]   = useState({ status: "", division: "", store: "", approver: "", q: "" });
 
   // Directory load, then silently restore a saved session against the LIVE
@@ -2092,7 +2291,13 @@ function App() {
   useEffect(() => {
     let unsub;
     function start() {
-      unsub = invoiceService.subscribe(setInvoices, e => setErr("Firestore: " + e.message));
+      unsub = invoiceService.subscribe(docs => {
+        // The vendor-routing rules live as a config doc inside the same
+        // collection; peel it off before anything treats it as an invoice.
+        const cfgDoc = docs.find(d => d.id === VENDOR_RULES_DOC || d._config);
+        if (cfgDoc) setVendorRules(cfgDoc.rules || {});
+        setInvoices(docs.filter(d => d.id !== VENDOR_RULES_DOC && !d._config));
+      }, e => setErr("Firestore: " + e.message));
     }
     if (window.FS) start();
     else window.addEventListener("firebase-ready", start, { once: true });
@@ -2322,6 +2527,7 @@ function App() {
             </button>
           </div>
           <NewInvoice stores={dir.stores} users={dir.users} currentUser={session}
+                      vendorRules={vendorRules}
                       knownVendors={[...new Set(invoices.map(i => i.vendor).filter(Boolean))]} />
         </div>
       )}
@@ -2451,7 +2657,8 @@ function App() {
       </nav>
 
       {tab === "settings" && canSeeAll ? (
-        <SettingsPanel invoices={invoices} users={dir.users} />
+        <SettingsPanel invoices={invoices} users={dir.users}
+                       vendorRules={vendorRules} currentUser={session} />
       ) : (
       <div className="space-y-3">
         {shown.length === 0 && (
