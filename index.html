@@ -45,7 +45,7 @@
 <script>
 window.APP_CONFIG = {
   // Shown in the footer for all users. Increment on every update.
-  version: "2.5",
+  version: "2.6",
   // Firestore
   firebase: {
     apiKey: "AIzaSyAxW6wajL9PH1Wlw3_QuBXgAMFgYWjkJp8",
@@ -764,13 +764,15 @@ const commentService = {
       err  => onErr && onErr(err));
   },
 
-  async add(invoiceId, author, text, inv) {
+  async add(invoiceId, author, text, inv, meta) {
     const ts = Date.now();
     await window.FS.addDoc(this._col(invoiceId), {
       userId: author.id,
       userName: author.name,
       userRole: author.role,
       text: String(text).trim(),
+      action: (meta && meta.action) || null,       // "APPROVE" | "REJECT" | null
+      storeName: (meta && meta.storeName) || null, // which chain the action was on
       ts
     });
     // Denormalize onto the invoice doc so notification counts are computable
@@ -1561,7 +1563,7 @@ function CommentThread({ invoiceId, inv, currentUser, canPost }) {
     <div className="mt-3 border-t pt-3">
       <div className="flex items-center justify-between">
         <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
-          Discussion{items && items.length ? " (" + items.length + ")" : ""}
+          Conversation{items && items.length ? " (" + items.length + ")" : ""}
         </p>
         {inv && !currentUser._sim && unreadCommentsFor(currentUser.id, inv) > 0 && (
           <button onClick={() => commentService.markRead(invoiceId, currentUser.id)}
@@ -1585,6 +1587,12 @@ function CommentThread({ invoiceId, inv, currentUser, canPost }) {
                   className={"rounded-lg px-3 py-2 " + (me ? "bg-sky-50" : "bg-slate-50")}>
                 <div className="flex flex-wrap items-baseline gap-2">
                   <span className="text-sm font-medium text-slate-800">{c.userName}</span>
+                  {c.action && (
+                    <span className={"rounded-full px-2 py-0.5 text-[10px] font-bold tracking-wide " +
+                      (c.action === "REJECT" ? "bg-red-100 text-red-700" : "bg-emerald-100 text-emerald-700")}>
+                      {c.action === "REJECT" ? "REJECTED" : "APPROVED"}{c.storeName ? " · " + c.storeName : ""}
+                    </span>
+                  )}
                   <span className="text-xs text-slate-400">
                     {roleLabel(c.userRole)} · {new Date(c.ts).toLocaleString()}
                   </span>
@@ -1693,7 +1701,6 @@ function ChainCard({ inv, chain, chainIdx, currentUser, now, onAct, canFinance }
               {h.action === "APPROVE" ? "approved" : h.action === "REJECT" ? "rejected" :
                h.action.toLowerCase()}{" "}
               · {new Date(h.ts).toLocaleString()}
-              {h.note && <span className="block pl-2 italic">"{h.note}"</span>}
             </li>
           ))}
         </ul>
@@ -1702,7 +1709,7 @@ function ChainCard({ inv, chain, chainIdx, currentUser, now, onAct, canFinance }
       {mine && (
         <div className="mt-2 border-t border-slate-200 pt-2">
           <input value={note} onChange={e => { setNote(e.target.value); if (noteErr) setNoteErr(""); }}
-            placeholder="Note — optional to approve, required to reject (25+ characters)"
+            placeholder="Add to the conversation — optional to approve, required to reject (25+ chars)"
             className={"w-full rounded-lg border px-3 py-1.5 text-sm " +
                        (noteErr ? "border-red-400 bg-red-50" : "border-slate-300")} />
           {noteErr && <p className="mt-1 text-xs font-medium text-red-700">{noteErr}</p>}
@@ -2498,6 +2505,16 @@ function App() {
       status: deriveStatus(chains),
       updatedAt: ts
     });
+
+    // One conversation per invoice: an approval/rejection note is a message
+    // like any other, tagged with the action and store. This is also what
+    // makes notes trigger the same notifications as comments.
+    if ((note || "").trim()) {
+      try {
+        await commentService.add(inv.id, session, note.trim(), inv,
+          { action, storeName: chain.storeName });
+      } catch (e) { /* the decision is already saved; a failed echo is non-fatal */ }
+    }
   }
 
   async function deleteInvoice(inv) {
