@@ -45,7 +45,7 @@
 <script>
 window.APP_CONFIG = {
   // Shown in the footer for all users. Increment on every update.
-  version: "2.9",
+  version: "3.1",
   // Firestore
   firebase: {
     apiKey: "AIzaSyAxW6wajL9PH1Wlw3_QuBXgAMFgYWjkJp8",
@@ -99,11 +99,11 @@ window.APP_CONFIG = {
   // stored in Firestore (config/vendorRules). Unknown vendors default to
   // Rahim; AWT and Rheagl are seeded to IT until Settings says otherwise.
   rateReviewers: {
-    IT:    { id: "rate:it",    email: "itsupport@dossaniparadise.com", name: "IT Support" },
+    IT:    { id: "rate:it",    email: "itsupport@dossaniparadise.com", name: "Usman Khan" },
     RAHIM: { id: "rate:rahim", email: "rahim@dossaniparadise.com",     name: "Rahim Virani" }
   },
   vendorRuleSeeds: { "awt": "IT", "rheagl services company": "IT" },
-  vendorRuleDefault: "RAHIM",
+  vendorRuleDefault: "NONE",
 
   // Finance / AP team. These people are NOT in the alignment directory yet.
   // When they are added, delete them here and they will resolve automatically —
@@ -112,7 +112,9 @@ window.APP_CONFIG = {
     { email: "kathreen@dossaniparadise.com", name: "Kathreen Mourad" },
     { email: "aali@dossaniparadise.com",     name: "Anwer Ali" },
     { email: "anila@dossaniparadise.com",    name: "Anila Dossani" },
-    { email: "husain@dossaniparadise.com",   name: "Husain Virani" }
+    { email: "husain@dossaniparadise.com",   name: "Husain Virani" },
+    { email: "jkhoja@dossaniparadise.com",   name: "Jennifer Khoja" },
+    { email: "tony@dossaniparadise.com",     name: "Tony Varghese" }
   ],
 
   // Routing rules
@@ -1225,17 +1227,56 @@ function StorePicker({ stores, selectedIds, onChange }) {
     return () => document.removeEventListener("mousedown", onDoc);
   }, []);
 
+  // Shorthand index: "Paradise Quick Stop #15" -> initials "pqs", numbers
+  // {15}. Lets people type internal shorthand like pqs15 — and pq15 also
+  // works, since pq is a prefix of pqs.
+  const shorthand = useMemo(() => {
+    const m = new Map();
+    stores.forEach(s => {
+      const words = (s.name || "").toLowerCase().replace(/[^a-z0-9\s]/g, " ")
+        .split(/\s+/).filter(Boolean);
+      const initials = words.filter(w => /^[a-z]/.test(w)).map(w => w[0]).join("");
+      const compact  = words.filter(w => /^[a-z]/.test(w)).join("");
+      const nums = new Set();
+      const addNum = x => { const d = String(x || "").replace(/\D/g, "").replace(/^0+/, "");
+                            if (d) nums.add(d); };
+      addNum(s.storeNumber);
+      words.forEach(w => { if (/\d/.test(w)) addNum(w); });
+      m.set(s.id, { initials, compact, nums });
+    });
+    return m;
+  }, [stores]);
+
   const shown = useMemo(() => {
     const t = q.trim().toLowerCase();
-    const base = t ? stores.filter(s =>
-      (s.name || "").toLowerCase().includes(t) ||
-      (s.storeNumber || "").toLowerCase().includes(t) ||
-      (s.storeNumber || "").replace(/^#0*/, "").toLowerCase().includes(t.replace(/^#0*/, "")) ||
-      (s.entity || "").toLowerCase().includes(t) ||
-      (s.division || "").toLowerCase().includes(t) ||
-      (s.storeManager || "").toLowerCase().includes(t)) : stores;
-    return base;
-  }, [q, stores]);
+    if (!t) return stores;
+
+    // Shorthand form: letters then digits, e.g. pqs5, pq15, bk23086 — also
+    // bare letters (pqs) or bare digits (23086).
+    const sh = t.replace(/[\s#]/g, "").match(/^([a-z]+)?0*(\d+)?$/);
+    const shAlpha = sh && sh[1] ? sh[1] : "";
+    const shNum   = sh && sh[2] ? sh[2] : "";
+
+    return stores.filter(s => {
+      const plain =
+        (s.name || "").toLowerCase().includes(t) ||
+        (s.storeNumber || "").toLowerCase().includes(t) ||
+        (s.storeNumber || "").replace(/^#0*/, "").toLowerCase().includes(t.replace(/^#0*/, "")) ||
+        (s.entity || "").toLowerCase().includes(t) ||
+        (s.division || "").toLowerCase().includes(t) ||
+        (s.storeManager || "").toLowerCase().includes(t);
+      if (plain) return true;
+
+      if (!sh || (!shAlpha && !shNum)) return false;
+      const idx = shorthand.get(s.id);
+      if (!idx) return false;
+      const alphaOk = !shAlpha ||
+        idx.initials.startsWith(shAlpha) ||   // pq -> pqs, bk -> bk
+        idx.compact.startsWith(shAlpha);      // parad -> paradisequickstop
+      const numOk = !shNum || idx.nums.has(shNum);
+      return alphaOk && numOk;
+    });
+  }, [q, stores, shorthand]);
 
   const selected = stores.filter(s => selectedIds.includes(s.id));
 
@@ -1310,7 +1351,7 @@ function StorePicker({ stores, selectedIds, onChange }) {
   );
 }
 
-function NewInvoice({ stores, users, currentUser, knownVendors, vendorRules, onDone }) {
+function NewInvoice({ stores, users, currentUser, knownVendors, vendorRules, invoices, onDone }) {
   const fs = useFilestack();
   const [storeIds, setStoreIds] = useState([]);
   const [vendor, setVendor]   = useState("");
@@ -1344,6 +1385,14 @@ function NewInvoice({ stores, users, currentUser, knownVendors, vendorRules, onD
 
   const selStores = stores.filter(s => storeIds.includes(s.id));
   const amt   = parseFloat(amount) || 0;
+
+  // Duplicate guard: same vendor + same invoice # as an existing invoice.
+  const norm = x => String(x || "").trim().toLowerCase().replace(/\s+/g, " ");
+  const dupOf = useMemo(() => {
+    const v = norm(vendor), n = norm(invoiceNumber);
+    if (!v || !n) return null;
+    return (invoices || []).find(i => norm(i.vendor) === v && norm(i.invoiceNumber) === n) || null;
+  }, [vendor, invoiceNumber, invoices]);
 
   // Second approver: the vendor rule decides, and finance can override it for
   // THIS invoice from the path rail. Changing the vendor resets the override
@@ -1388,6 +1437,11 @@ function NewInvoice({ stores, users, currentUser, knownVendors, vendorRules, onD
     if (!selStores.length) return setErr("Pick at least one store.");
     if (!vendor.trim())    return setErr("Enter a vendor.");
     if (!(amt > 0))        return setErr("Enter an amount.");
+    if (!invoiceNumber.trim()) return setErr("Enter the invoice number — it's on the document in the preview.");
+    if (dupOf) return setErr("Duplicate invoice: " + dupOf.vendor + " #" + dupOf.invoiceNumber +
+      " is already in PayMi (" + (dupOf.status || "").toLowerCase() +
+      ", created " + (dupOf.createdAt ? new Date(dupOf.createdAt).toLocaleDateString() : "earlier") +
+      "). It was not uploaded again.");
 
     const now = Date.now();
     const chains = buildChains(selStores, amt, users, now, rateRule);
@@ -1565,9 +1619,15 @@ function NewInvoice({ stores, users, currentUser, knownVendors, vendorRules, onD
           </label>
 
           <label className="text-sm">
-            <span className="text-slate-600">Invoice # <span className="text-slate-400">(optional)</span></span>
+            <span className="text-slate-600">Invoice #</span>
             <input value={invoiceNumber} onChange={e => setInvoiceNumber(e.target.value)}
-              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+              className={"mt-1 w-full rounded-lg border px-3 py-2 text-sm " +
+                         (dupOf ? "border-red-400 bg-red-50" : "border-slate-300")} />
+            {dupOf && (
+              <span className="mt-1 block text-xs font-medium text-red-700">
+                Already in PayMi: {dupOf.vendor} #{dupOf.invoiceNumber} ({(dupOf.status || "").toLowerCase()}).
+              </span>
+            )}
           </label>
         </div>
 
@@ -2144,7 +2204,7 @@ function VendorRoutingPanel({ invoices, vendorRules, currentUser }) {
   function addVendor() {
     const k = newVendor.trim().toLowerCase();
     if (!k) return;
-    setDraft({ ...rules, [k]: "RAHIM" });
+    setDraft({ ...rules, [k]: "NONE" });
     setNewVendor("");
   }
   async function save() {
@@ -2160,8 +2220,8 @@ function VendorRoutingPanel({ invoices, vendorRules, currentUser }) {
       <h2 className="text-sm font-semibold text-slate-900">Vendor routing — second approver</h2>
       <p className="mt-1 text-sm text-slate-500">
         Who checks the rate after the DM confirms the work. Unlisted vendors
-        default to Rahim; AWT and Rheagl Services Company default to IT.
-        Changes affect newly created invoices only.
+        get no second approver by default; AWT and Rheagl Services Company
+        default to IT. Changes affect newly created invoices only.
       </p>
 
       <div className="mt-4 max-h-80 space-y-1 overflow-y-auto pr-1">
@@ -2534,7 +2594,7 @@ function App() {
             </button>
           </div>
           <NewInvoice stores={dir.stores} users={dir.users} currentUser={session}
-                      vendorRules={vendorRules}
+                      vendorRules={vendorRules} invoices={invoices}
                       knownVendors={[...new Set(invoices.map(i => i.vendor).filter(Boolean))]} />
         </div>
       )}
